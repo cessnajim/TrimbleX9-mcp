@@ -19,12 +19,17 @@ Transport: stdio (run under an MCP client). Independent project, not affiliated
 with any instrument manufacturer.
 """
 import asyncio
+import math
 import os
 import re
+import struct
 import time
+import uuid as uuidlib
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
+
+__version__ = "0.1.0"
 
 BASE = os.environ.get("SCANNER_BASE", "http://192.168.42.1:34567/api/v1").rstrip("/")
 ALLOW_ACTUATION = os.environ.get("SCANNER_ALLOW_ACTUATION", "").lower() in ("1", "true", "yes")
@@ -33,7 +38,7 @@ DOWNLOAD_DIR = os.path.realpath(
 )
 TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
-mcp = FastMCP("scanner")
+mcp = FastMCP("trimblex9")
 
 
 def _url(path: str) -> str:
@@ -93,9 +98,125 @@ async def _stream_to(url: str, path: str) -> int:
     return total
 
 
+def _existing_file(filename: str) -> str:
+    """Resolve a plain file name to an existing file inside DOWNLOAD_DIR."""
+    if not _SAFE_NAME.fullmatch(filename) or ".." in filename:
+        raise ValueError(f"invalid filename {filename!r}: use a plain name from the download directory")
+    path = os.path.realpath(os.path.join(DOWNLOAD_DIR, filename))
+    if os.path.dirname(path) != DOWNLOAD_DIR or not os.path.isfile(path):
+        raise ValueError(f"{filename!r} not found in {DOWNLOAD_DIR}; download it first")
+    return path
+
+
+# ------------------------------------------------------- scan-file geometry -----
+# Observed .tzf layout (see the TrimbleX9-tzf project): u64 at 0x10 points to a
+# metadata block holding f64 angle steps (+0x10 horizontal, +0x18 vertical),
+# f64 start VA (+0x20, radians from zenith), f64 negated start HA (+0x28) and
+# u32 grid rows/cols (+0x30/+0x34).
+
+def _scan_geometry(path: str) -> dict:
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        fh.seek(0x10)
+        meta = struct.unpack("<Q", fh.read(8))[0]
+        if not 0x5c <= meta <= size - 0x38:
+            raise ValueError(f"{os.path.basename(path)} does not look like a scan file")
+        fh.seek(meta + 0x10)
+        step_h, step_v, start_va, neg_start_ha = struct.unpack("<4d", fh.read(32))
+        rows, cols = struct.unpack("<2I", fh.read(8))
+    if not (0 < step_h < 0.1 and 0 < step_v < 0.1 and rows and cols):
+        raise ValueError(f"{os.path.basename(path)}: implausible scan geometry")
+    return {"step_h": step_h, "step_v": step_v, "start_ha": (-neg_start_ha) % math.tau,
+            "start_va": start_va, "rows": rows, "cols": cols}
+
+
+def _jpeg_size(path: str) -> tuple[int, int]:
+    """(width, height) from a JPEG's SOF marker."""
+    with open(path, "rb") as fh:
+        if fh.read(2) != b"\xff\xd8":
+            raise ValueError(f"{os.path.basename(path)} is not a JPEG")
+        while True:
+            marker = fh.read(2)
+            if len(marker) < 2 or marker[0] != 0xFF:
+                raise ValueError(f"{os.path.basename(path)}: no frame header found")
+            seglen = struct.unpack(">H", fh.read(2))[0]
+            if 0xC0 <= marker[1] <= 0xCF and marker[1] not in (0xC4, 0xC8, 0xCC):
+                h, w = struct.unpack(">xHH", fh.read(5))
+                return w, h
+            fh.seek(seglen - 2, 1)
+
+
+# ------------------------------------------------------------- launch safety -----
+# The instrument answers 202 even when it cannot parse a scan request, and then
+# runs a default full-dome scan. So every launch is validated locally first and
+# the echoed request is checked afterwards; a mismatch is cancelled at once.
+
+async def _check_project(project_name: str, project_uuid: str) -> None:
+    try:
+        uuidlib.UUID(project_uuid)
+    except ValueError:
+        raise ValueError(f"project_uuid {project_uuid!r} is not a UUID") from None
+    projects = await _get_json("projects")
+    if not any(p.get("projectName") == project_name and p.get("projectUUID") == project_uuid
+               for p in projects):
+        raise ValueError("no project with that project_name AND project_uuid; "
+                         "see scanner_projects or create one with scanner_create_project")
+
+
+async def _check_mode(scan_mode: str) -> None:
+    modes = [m.get("scanMode") for m in await _get_json("scans/modes")]
+    if scan_mode not in modes:
+        raise ValueError(f"unknown scan_mode {scan_mode!r}; valid: {', '.join(modes)}")
+
+
+async def _cancel(task_id) -> int:
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.delete(_url(f"tasks/{task_id}"))
+        return r.status_code
+
+
+async def _launch(body: dict) -> dict:
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.post(_url("scans"), json=body)
+        r.raise_for_status()
+        task = r.json()
+    echo = task.get("scanRequest") or {}
+
+    def same(sent, got):
+        if isinstance(sent, float):
+            return isinstance(got, (int, float)) and abs(got - sent) < 1e-9
+        return got == sent
+
+    bad = {k: (v, echo.get(k)) for k, v in body.items() if not same(v, echo.get(k))}
+    if bad:
+        status = await _cancel(task.get("id"))
+        raise RuntimeError(f"instrument did not accept the request as sent (sent vs echoed: {bad}); "
+                           f"cancelled its task (HTTP {status})")
+    return _task_summary(task)
+
+
+async def _delete_verified(kind: str, uuid_key: str, uuid_value: str) -> dict:
+    """Delete by UUID. Instrument ids are list positions that shift after every
+    delete, so resolve the current id immediately before deleting and confirm
+    afterwards that exactly that record is gone."""
+    items = await _get_json(kind)
+    match = [i for i in items if i.get(uuid_key) == uuid_value]
+    if len(match) != 1:
+        raise ValueError(f"no {kind[:-1]} with {uuid_key} {uuid_value!r}")
+    item_id = match[0]["id"]
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.delete(_url(f"{kind}/{item_id}"))
+        r.raise_for_status()
+    after = await _get_json(kind)
+    if any(i.get(uuid_key) == uuid_value for i in after) or len(after) != len(items) - 1:
+        raise RuntimeError(f"delete of {uuid_value} not confirmed; re-check {kind} before retrying")
+    return {"deleted": kind[:-1], uuid_key: uuid_value, "id_at_delete": item_id}
+
+
 def _task_summary(t: dict) -> dict:
     p = t.get("percentage")
     return {
+        "id": t.get("id"),
         "taskUUID": t.get("taskUUID"),
         "type": t.get("type"),
         "state": t.get("state"),
@@ -123,8 +244,9 @@ async def scanner_projects() -> list:
 
 @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_scans() -> list:
-    """List all scans as compact records (id, scanMode, points, file path, and
-    the project folder the scan belongs to)."""
+    """List all scans as compact records (id, scanUUID, scanMode, points, file
+    path, and the project folder the scan belongs to). Ids are list positions
+    and change when scans are deleted; scanUUID is stable."""
     scans = await _get_json("scans")
     out = []
     for s in scans:
@@ -132,6 +254,7 @@ async def scanner_scans() -> list:
         f = t.get("file", "") or ""
         out.append({
             "id": s.get("id"),
+            "scanUUID": s.get("scanUUID"),
             "scanMode": s.get("scanMode"),
             "nbPoints": t.get("nbPoints"),
             "fileSizeMB": round((t.get("fileSize") or 0) / 1e6, 1),
@@ -222,6 +345,40 @@ async def scanner_download_preview(
     return {"scanFileId": scan_file_id, "bytes": n, "path": path}
 
 
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+async def scanner_preview_to_angles(
+    scan_filename: str, preview_filename: str,
+    x0: int, y0: int, x1: int, y1: int, margin_deg: float = 0.5,
+) -> dict:
+    """Convert a box drawn on a scan's preview JPEG into instrument angles for
+    scanner_launch_area_scan. Both files must already be in the download
+    directory (scanner_download_scanfile + scanner_download_preview of the same
+    scan, taken from the station the instrument is still standing on).
+    (x0, y0)-(x1, y1) are preview pixel corners, y down; if x1 < x0 the box
+    wraps across the panorama seam. `margin_deg` pads every side.
+    Returns start_ha/delta_ha/start_va/delta_va in radians (VA from zenith)."""
+    geo = _scan_geometry(_existing_file(scan_filename))
+    pw, ph = _jpeg_size(_existing_file(preview_filename))
+    sx, sy = geo["cols"] / pw, geo["rows"] / ph
+    if not (0 <= x0 <= pw and 0 <= x1 <= pw and 0 <= y0 < y1 <= ph):
+        raise ValueError(f"box must lie within the {pw}x{ph} preview with y0 < y1")
+    margin = math.radians(max(0.0, float(margin_deg)))
+    if x1 == x0:
+        raise ValueError("box has zero width")
+    width_px = x1 - x0 if x1 > x0 else x1 + pw - x0
+    start_ha = (geo["start_ha"] + x0 * sx * geo["step_h"] - margin) % math.tau
+    delta_ha = min(math.tau, width_px * sx * geo["step_h"] + 2 * margin)
+    start_va = max(0.0, geo["start_va"] + y0 * sy * geo["step_v"] - margin)
+    end_va = min(math.pi, geo["start_va"] + y1 * sy * geo["step_v"] + margin)
+    return {
+        "start_ha": round(start_ha, 6), "delta_ha": round(delta_ha, 6),
+        "start_va": round(start_va, 6), "delta_va": round(end_va - start_va, 6),
+        "degrees": {"ha": [round(math.degrees(start_ha), 2), round(math.degrees(delta_ha), 2)],
+                    "va": [round(math.degrees(start_va), 2), round(math.degrees(end_va - start_va), 2)]},
+        "preview_cells_per_px": [round(sx, 3), round(sy, 3)],
+    }
+
+
 # --------------------------------------------- actuating / destructive -------
 # Registered only when SCANNER_ALLOW_ACTUATION is truthy.
 
@@ -238,37 +395,72 @@ if ALLOW_ACTUATION:
             return r.json()
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
-    async def scanner_launch_scan(project_name: str, project_uuid: str,
-                                  scan_mode: str) -> dict:
-        """ACTUATING: start a scan — moves the instrument and fires its laser for
-        the mode's duration. To target a project you MUST pass BOTH project_name
-        and project_uuid (UUID alone is ignored). `scan_mode` is one of the names
-        from scanner_scan_modes. Returns the accepted task; follow it with
-        scanner_tasks or scanner_wait_for_scan. Ensure the instrument is safely
-        positioned before calling."""
-        body = {"scanMode": scan_mode, "projectName": project_name,
-                "projectUUID": project_uuid, "fastMode": False, "colorMode": "OFF"}
-        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
-            r = await c.post(_url("scans"), json=body)
-            r.raise_for_status()
-            return r.json()
+    async def scanner_launch_scan(project_name: str, project_uuid: str, scan_mode: str,
+                                  color: bool = False) -> dict:
+        """ACTUATING: start a full-dome scan — moves the instrument and fires its
+        laser for the mode's duration. Pass BOTH project_name and project_uuid of
+        an existing project; `scan_mode` is a name from scanner_scan_modes;
+        `color` also captures images (slower). Inputs are checked first, and if
+        the instrument does not echo the request back as sent the task is
+        cancelled and an error raised. Returns the task; follow it with
+        scanner_wait_for_scan. Ensure the instrument is safely positioned."""
+        await _check_project(project_name, project_uuid)
+        await _check_mode(scan_mode)
+        return await _launch({"scanMode": scan_mode, "projectName": project_name,
+                              "projectUUID": project_uuid, "scanType": "FullDome",
+                              "fastMode": False, "colorMode": "ON" if color else "OFF"})
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
+    async def scanner_launch_area_scan(project_name: str, project_uuid: str, scan_mode: str,
+                                       start_ha: float, delta_ha: float,
+                                       start_va: float, delta_va: float,
+                                       color: bool = False) -> dict:
+        """ACTUATING: scan only a window of the scene. Angles are radians: HA
+        0..2π (horizontal), VA from the zenith 0..π; get them from
+        scanner_preview_to_angles. Same project/mode/safety rules as
+        scanner_launch_scan. Small windows take about a minute without color."""
+        start_ha, delta_ha = float(start_ha) % math.tau, float(delta_ha)
+        start_va, delta_va = float(start_va), float(delta_va)
+        if not 0 < delta_ha <= math.tau:
+            raise ValueError("delta_ha must be in (0, 2π]")
+        if not (0 <= start_va <= math.pi and 0 < delta_va <= math.pi - start_va):
+            raise ValueError("need 0 <= start_va and 0 < delta_va with start_va + delta_va <= π")
+        await _check_project(project_name, project_uuid)
+        await _check_mode(scan_mode)
+        return await _launch({"scanMode": scan_mode, "projectName": project_name,
+                              "projectUUID": project_uuid, "scanType": "AreaScan",
+                              "fastMode": False, "colorMode": "ON" if color else "OFF",
+                              "startHA": start_ha, "deltaHA": delta_ha,
+                              "startVA": start_va, "deltaVA": delta_va})
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
-    async def scanner_delete_scan(scan_id: int) -> dict:
-        """DESTRUCTIVE: permanently delete a scan (and its file) from the instrument."""
-        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
-            r = await c.delete(_url(f"scans/{scan_id}"))
-            r.raise_for_status()
-            return {"deleted": "scan", "id": scan_id, "status": r.status_code}
+    async def scanner_cancel_task(task_uuid: str) -> dict:
+        """Cancel a running task (e.g. stop a scan in progress) by its taskUUID
+        from scanner_tasks. The partial scan is discarded."""
+        match = [t for t in await _get_json("tasks") if t.get("taskUUID") == task_uuid]
+        if not match:
+            raise ValueError(f"no running task {task_uuid!r}; see scanner_tasks")
+        status = await _cancel(match[0]["id"])
+        if status >= 400:
+            raise RuntimeError(f"cancel refused (HTTP {status})")
+        return {"cancelled": task_uuid, "status": status}
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
-    async def scanner_delete_project(project_id: int) -> dict:
-        """DESTRUCTIVE: permanently delete a project (by integer id) and its scans."""
-        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
-            r = await c.delete(_url(f"projects/{project_id}"))
-            r.raise_for_status()
-            return {"deleted": "project", "id": project_id, "status": r.status_code}
+    async def scanner_delete_scan(scan_uuid: str) -> dict:
+        """DESTRUCTIVE: permanently delete a scan (and its file), identified by its
+        scanUUID from scanner_scans. Deletion is confirmed afterwards."""
+        return await _delete_verified("scans", "scanUUID", scan_uuid)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
+    async def scanner_delete_project(project_uuid: str) -> dict:
+        """DESTRUCTIVE: permanently delete a project and its scans, identified by
+        its projectUUID from scanner_projects. Deletion is confirmed afterwards."""
+        return await _delete_verified("projects", "projectUUID", project_uuid)
+
+
+def main() -> None:
+    mcp.run()
 
 
 if __name__ == "__main__":
-    mcp.run()
+    main()

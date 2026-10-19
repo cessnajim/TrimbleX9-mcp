@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trimblex9-mcp"
+version = "0.1.0"
+description = "MCP server for the Trimble X9 laser scanner's local HTTP API (read-only by default)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    # FastMCP v1 API; mcp 2.x renamed it (MCPServer). Migration tracked separately.
+    "mcp>=1.2,<2",
+    "httpx>=0.27",
+]
+keywords = ["mcp", "model-context-protocol", "lidar", "laser-scanner", "point-cloud", "trimble"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+[project.scripts]
+trimblex9-mcp = "scanner_mcp:main"
+
+[project.urls]
+Repository = "https://github.com/cessnajim/TrimbleX9-mcp"
+
+[tool.setuptools]
+py-modules = ["scanner_mcp"]
