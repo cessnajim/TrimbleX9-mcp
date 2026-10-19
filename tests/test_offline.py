@@ -155,3 +155,15 @@ def test_preview_to_angles():
     assert math.isclose(wrap["delta_ha"], 22 * sx * step, abs_tol=1e-5)
     assert "not found" in raises("scanner_preview_to_angles", scan_filename="nope.tzf",
                                  preview_filename="dome.jpg", x0=0, y0=0, x1=1, y1=1)
+
+
+def test_launch_refused_while_busy():
+    reset()
+    STATE["tasks"] = [{"id": 3, "taskUUID": "other-client", "type": "scan", "state": "running"}]
+    err = raises("scanner_launch_area_scan", project_name="probe", project_uuid=P_UUID,
+                 scan_mode="HS_L1", start_ha=0, delta_ha=0.2, start_va=1.47, delta_va=0.2)
+    assert "busy" in err and "other-client" in err
+    assert "busy" in raises("scanner_launch_scan", project_name="probe", project_uuid=P_UUID,
+                            scan_mode="HS_L1")
+    assert STATE["tasks"][0]["taskUUID"] == "other-client"  # nothing was posted
+    assert STATE["cancelled"] == []

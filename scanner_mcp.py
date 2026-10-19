@@ -29,7 +29,7 @@ import uuid as uuidlib
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 BASE = os.environ.get("SCANNER_BASE", "http://192.168.42.1:34567/api/v1").rstrip("/")
 ALLOW_ACTUATION = os.environ.get("SCANNER_ALLOW_ACTUATION", "").lower() in ("1", "true", "yes")
@@ -161,6 +161,16 @@ async def _check_project(project_name: str, project_uuid: str) -> None:
                for p in projects):
         raise ValueError("no project with that project_name AND project_uuid; "
                          "see scanner_projects or create one with scanner_create_project")
+
+
+async def _check_idle() -> None:
+    """Refuse to launch while any task is running or queued: another client
+    (or another agent) may be driving the instrument."""
+    tasks = await _get_json("tasks")
+    if tasks:
+        busy = ", ".join(f"{t.get('type')} {t.get('taskUUID')} ({t.get('state')})" for t in tasks)
+        raise RuntimeError(f"instrument is busy: {busy}. Wait with scanner_wait_for_scan, "
+                           "or stop it with scanner_cancel_task if it is yours")
 
 
 async def _check_mode(scan_mode: str) -> None:
@@ -400,10 +410,12 @@ if ALLOW_ACTUATION:
         """ACTUATING: start a full-dome scan — moves the instrument and fires its
         laser for the mode's duration. Pass BOTH project_name and project_uuid of
         an existing project; `scan_mode` is a name from scanner_scan_modes;
-        `color` also captures images (slower). Inputs are checked first, and if
+        `color` also captures images (slower). Refuses while any task is running
+        (another client may be using the instrument). Inputs are checked first, and if
         the instrument does not echo the request back as sent the task is
         cancelled and an error raised. Returns the task; follow it with
         scanner_wait_for_scan. Ensure the instrument is safely positioned."""
+        await _check_idle()
         await _check_project(project_name, project_uuid)
         await _check_mode(scan_mode)
         return await _launch({"scanMode": scan_mode, "projectName": project_name,
@@ -425,6 +437,7 @@ if ALLOW_ACTUATION:
             raise ValueError("delta_ha must be in (0, 2π]")
         if not (0 <= start_va <= math.pi and 0 < delta_va <= math.pi - start_va):
             raise ValueError("need 0 <= start_va and 0 < delta_va with start_va + delta_va <= π")
+        await _check_idle()
         await _check_project(project_name, project_uuid)
         await _check_mode(scan_mode)
         return await _launch({"scanMode": scan_mode, "projectName": project_name,

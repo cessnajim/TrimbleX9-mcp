@@ -16,17 +16,17 @@ project, **not affiliated with or endorsed by Trimble Inc.**; "Trimble" and
 ## Install
 
 ```bash
-uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.0 trimblex9-mcp
+uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.1 trimblex9-mcp
 # or
-pipx install git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.0
+pipx install git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.1
 # no git on the host (e.g. a minimal Raspberry Pi image):
-pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.1.0.tar.gz
+pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.1.1.tar.gz
 ```
 
 Register with an MCP client (read‑only):
 
 ```bash
-claude mcp add trimblex9 -- uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.0 trimblex9-mcp
+claude mcp add trimblex9 -- uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.1 trimblex9-mcp
 ```
 
 Add `--env SCANNER_ALLOW_ACTUATION=1` (and `--env SCANNER_BASE=...`,
@@ -63,7 +63,8 @@ A typical scan is `scanner_launch_scan` → `scanner_wait_for_scan` →
 
 ### Launch safety
 
-The instrument accepts (HTTP 202) requests it cannot parse and then runs a
+Launches are refused while any task is running or queued, since another
+client may be using the instrument. The instrument accepts (HTTP 202) requests it cannot parse and then runs a
 default full‑dome scan, and it ignores `projectUUID` unless `projectName` also
 matches. So the launch tools check the project (name **and** UUID), the scan
 mode and the angles before sending anything, then compare the request the
