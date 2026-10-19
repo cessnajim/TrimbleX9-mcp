@@ -41,6 +41,10 @@ class Stub(http.server.BaseHTTPRequestHandler):
             return self._send([dict(s, id=i) for i, s in enumerate(STATE["scans"])])
         if p == "tasks":
             return self._send(STATE["tasks"])
+        if p == "status":
+            return self._send({"batteryLevel": 80, "wifiConfiguration": {
+                "SSID": "SCANNER-1", "key": "hunter2-plaintext", "isFactoryKey": True, "wifiBand": "both"},
+                "errorList": [{"type": "NoError"}]})
         self._send({}, 404)
 
     def do_POST(self):
@@ -167,3 +171,10 @@ def test_launch_refused_while_busy():
                             scan_mode="HS_L1")
     assert STATE["tasks"][0]["taskUUID"] == "other-client"  # nothing was posted
     assert STATE["cancelled"] == []
+
+
+def test_status_masks_wifi_key():
+    s = call("scanner_status")
+    w = s["wifiConfiguration"]
+    assert w["key"] == "***" and w["SSID"] == "SCANNER-1" and w["isFactoryKey"] is True
+    assert "hunter2" not in json.dumps(s)

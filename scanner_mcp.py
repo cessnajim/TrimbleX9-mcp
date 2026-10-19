@@ -29,7 +29,7 @@ import uuid as uuidlib
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 BASE = os.environ.get("SCANNER_BASE", "http://192.168.42.1:34567/api/v1").rstrip("/")
 ALLOW_ACTUATION = os.environ.get("SCANNER_ALLOW_ACTUATION", "").lower() in ("1", "true", "yes")
@@ -223,6 +223,21 @@ async def _delete_verified(kind: str, uuid_key: str, uuid_value: str) -> dict:
     return {"deleted": kind[:-1], uuid_key: uuid_value, "id_at_delete": item_id}
 
 
+_SECRET_NAME = re.compile(r"(key|psk|passphrase|password|secret|token)$", re.IGNORECASE)
+
+
+def _redact(obj):
+    """Mask secret-looking string fields (e.g. the WiFi passphrase that the
+    instrument returns in plain text in its status). Booleans such as
+    isFactoryKey are kept."""
+    if isinstance(obj, dict):
+        return {k: ("***" if isinstance(v, str) and v and _SECRET_NAME.search(k) else _redact(v))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact(v) for v in obj]
+    return obj
+
+
 def _task_summary(t: dict) -> dict:
     p = t.get("percentage")
     return {
@@ -241,8 +256,9 @@ def _task_summary(t: dict) -> dict:
 @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_status() -> dict:
     """Get the instrument's current status: battery, AC state, leveling, on-board
-    storage, IMU, laser-pointer, WiFi config, and the active error list."""
-    return await _get_json("status")
+    storage, IMU, laser-pointer, WiFi config (passphrase masked), and the active
+    error list."""
+    return _redact(await _get_json("status"))
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})

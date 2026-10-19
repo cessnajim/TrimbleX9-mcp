@@ -16,17 +16,17 @@ project, **not affiliated with or endorsed by Trimble Inc.**; "Trimble" and
 ## Install
 
 ```bash
-uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.1 trimblex9-mcp
+uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.2 trimblex9-mcp
 # or
-pipx install git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.1
+pipx install git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.2
 # no git on the host (e.g. a minimal Raspberry Pi image):
-pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.1.1.tar.gz
+pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.1.2.tar.gz
 ```
 
 Register with an MCP client (read‑only):
 
 ```bash
-claude mcp add trimblex9 -- uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.1 trimblex9-mcp
+claude mcp add trimblex9 -- uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.2 trimblex9-mcp
 ```
 
 Add `--env SCANNER_ALLOW_ACTUATION=1` (and `--env SCANNER_BASE=...`,
@@ -36,7 +36,7 @@ is connected to; a remote agent reaches it by running it there or over SSH.
 ## Tools
 
 **Always available (read / query / download):**
-- `scanner_status` — battery, leveling, storage, wifi, errors
+- `scanner_status` — battery, leveling, storage, wifi (passphrase masked), errors
 - `scanner_projects` — list projects
 - `scanner_scans` — list scans (compact: id, scanUUID, mode, points, file, project)
 - `scanner_scan_modes` — the scan‑mode menu (density / range / time)
