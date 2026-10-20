@@ -23,6 +23,8 @@ Transport: stdio (run under an MCP client). Independent project, not affiliated
 with any instrument manufacturer.
 """
 import asyncio
+import functools
+import inspect
 import math
 import os
 import re
@@ -31,9 +33,16 @@ import time
 import uuid as uuidlib
 
 import httpx
-from mcp.server.fastmcp import Context, FastMCP
 
-__version__ = "0.2.0"
+try:  # mcp 2.x renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import Context
+    from mcp.server.mcpserver import MCPServer as FastMCP
+    from mcp.server.mcpserver.exceptions import ToolError
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import Context, FastMCP
+    from mcp.server.fastmcp.exceptions import ToolError
+
+__version__ = "0.3.0"
 
 BASE = os.environ.get("SCANNER_BASE", "http://192.168.42.1:34567/api/v1").rstrip("/")
 ALLOW_ACTUATION = os.environ.get("SCANNER_ALLOW_ACTUATION", "").lower() in ("1", "true", "yes")
@@ -43,6 +52,37 @@ DOWNLOAD_DIR = os.path.realpath(
 TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
 mcp = FastMCP("trimblex9")
+
+
+def _http_error_text(e: httpx.HTTPError) -> str:
+    if isinstance(e, httpx.HTTPStatusError):
+        return f"HTTP {e.response.status_code} from {e.request.url}: {e.response.text[:200]}"
+    return f"instrument unreachable ({type(e).__name__}: {e})"
+
+
+def _tool_errors(fn):
+    """Report HTTP and connection failures as tool errors, whose text reaches
+    the client (mcp 2.x hides the text of other exceptions)."""
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def wrapper(*a, **k):
+            try:
+                return await fn(*a, **k)
+            except httpx.HTTPError as e:
+                raise ToolError(_http_error_text(e)) from e
+    else:
+        @functools.wraps(fn)
+        def wrapper(*a, **k):
+            try:
+                return fn(*a, **k)
+            except httpx.HTTPError as e:
+                raise ToolError(_http_error_text(e)) from e
+    return wrapper
+
+
+def tool(**kw):
+    """mcp.tool, with HTTP failures reported as tool errors."""
+    return lambda fn: mcp.tool(**kw)(_tool_errors(fn))
 
 
 def _url(path: str) -> str:
@@ -70,16 +110,16 @@ def _dest(filename: str | None, default: str, overwrite: bool) -> str:
     """
     name = filename or default
     if not _SAFE_NAME.fullmatch(name) or ".." in name:
-        raise ValueError(
+        raise ToolError(
             f"invalid filename {name!r}: use a plain name such as 'scan-14.tzf' "
             "(letters, digits, '.', '_', '-'; no paths)"
         )
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     path = os.path.realpath(os.path.join(DOWNLOAD_DIR, name))
     if os.path.dirname(path) != DOWNLOAD_DIR:
-        raise ValueError(f"refusing to write outside the download directory {DOWNLOAD_DIR}")
+        raise ToolError(f"refusing to write outside the download directory {DOWNLOAD_DIR}")
     if os.path.exists(path) and not overwrite:
-        raise ValueError(f"{path} already exists; pass overwrite=true to replace it")
+        raise ToolError(f"{path} already exists; pass overwrite=true to replace it")
     return path
 
 
@@ -105,10 +145,10 @@ async def _stream_to(url: str, path: str) -> int:
 def _existing_file(filename: str) -> str:
     """Resolve a plain file name to an existing file inside DOWNLOAD_DIR."""
     if not _SAFE_NAME.fullmatch(filename) or ".." in filename:
-        raise ValueError(f"invalid filename {filename!r}: use a plain name from the download directory")
+        raise ToolError(f"invalid filename {filename!r}: use a plain name from the download directory")
     path = os.path.realpath(os.path.join(DOWNLOAD_DIR, filename))
     if os.path.dirname(path) != DOWNLOAD_DIR or not os.path.isfile(path):
-        raise ValueError(f"{filename!r} not found in {DOWNLOAD_DIR}; download it first")
+        raise ToolError(f"{filename!r} not found in {DOWNLOAD_DIR}; download it first")
     return path
 
 
@@ -124,12 +164,12 @@ def _scan_geometry(path: str) -> dict:
         fh.seek(0x10)
         meta = struct.unpack("<Q", fh.read(8))[0]
         if not 0x5c <= meta <= size - 0x38:
-            raise ValueError(f"{os.path.basename(path)} does not look like a scan file")
+            raise ToolError(f"{os.path.basename(path)} does not look like a scan file")
         fh.seek(meta + 0x10)
         step_h, step_v, start_va, neg_start_ha = struct.unpack("<4d", fh.read(32))
         rows, cols = struct.unpack("<2I", fh.read(8))
     if not (0 < step_h < 0.1 and 0 < step_v < 0.1 and rows and cols):
-        raise ValueError(f"{os.path.basename(path)}: implausible scan geometry")
+        raise ToolError(f"{os.path.basename(path)}: implausible scan geometry")
     return {"step_h": step_h, "step_v": step_v, "start_ha": (-neg_start_ha) % math.tau,
             "start_va": start_va, "rows": rows, "cols": cols}
 
@@ -138,11 +178,11 @@ def _jpeg_size(path: str) -> tuple[int, int]:
     """(width, height) from a JPEG's SOF marker."""
     with open(path, "rb") as fh:
         if fh.read(2) != b"\xff\xd8":
-            raise ValueError(f"{os.path.basename(path)} is not a JPEG")
+            raise ToolError(f"{os.path.basename(path)} is not a JPEG")
         while True:
             marker = fh.read(2)
             if len(marker) < 2 or marker[0] != 0xFF:
-                raise ValueError(f"{os.path.basename(path)}: no frame header found")
+                raise ToolError(f"{os.path.basename(path)}: no frame header found")
             seglen = struct.unpack(">H", fh.read(2))[0]
             if 0xC0 <= marker[1] <= 0xCF and marker[1] not in (0xC4, 0xC8, 0xCC):
                 h, w = struct.unpack(">xHH", fh.read(5))
@@ -159,11 +199,11 @@ async def _check_project(project_name: str, project_uuid: str) -> None:
     try:
         uuidlib.UUID(project_uuid)
     except ValueError:
-        raise ValueError(f"project_uuid {project_uuid!r} is not a UUID") from None
+        raise ToolError(f"project_uuid {project_uuid!r} is not a UUID") from None
     projects = await _get_json("projects")
     if not any(p.get("projectName") == project_name and p.get("projectUUID") == project_uuid
                for p in projects):
-        raise ValueError("no project with that project_name AND project_uuid; "
+        raise ToolError("no project with that project_name AND project_uuid; "
                          "see scanner_projects or create one with scanner_create_project")
 
 
@@ -173,14 +213,14 @@ async def _check_idle() -> None:
     tasks = await _get_json("tasks")
     if tasks:
         busy = ", ".join(f"{t.get('type')} {t.get('taskUUID')} ({t.get('state')})" for t in tasks)
-        raise RuntimeError(f"instrument is busy: {busy}. Wait with scanner_wait_for_scan, "
+        raise ToolError(f"instrument is busy: {busy}. Wait with scanner_wait_for_scan, "
                            "or stop it with scanner_cancel_task if it is yours")
 
 
 async def _check_mode(scan_mode: str) -> None:
     modes = [m.get("scanMode") for m in await _get_json("scans/modes")]
     if scan_mode not in modes:
-        raise ValueError(f"unknown scan_mode {scan_mode!r}; valid: {', '.join(modes)}")
+        raise ToolError(f"unknown scan_mode {scan_mode!r}; valid: {', '.join(modes)}")
 
 
 async def _cancel(task_id) -> int:
@@ -204,7 +244,7 @@ async def _launch(body: dict) -> dict:
     bad = {k: (v, echo.get(k)) for k, v in body.items() if not same(v, echo.get(k))}
     if bad:
         status = await _cancel(task.get("id"))
-        raise RuntimeError(f"instrument did not accept the request as sent (sent vs echoed: {bad}); "
+        raise ToolError(f"instrument did not accept the request as sent (sent vs echoed: {bad}); "
                            f"cancelled its task (HTTP {status})")
     return _task_summary(task)
 
@@ -216,14 +256,14 @@ async def _delete_verified(kind: str, uuid_key: str, uuid_value: str) -> dict:
     items = await _get_json(kind)
     match = [i for i in items if i.get(uuid_key) == uuid_value]
     if len(match) != 1:
-        raise ValueError(f"no {kind[:-1]} with {uuid_key} {uuid_value!r}")
+        raise ToolError(f"no {kind[:-1]} with {uuid_key} {uuid_value!r}")
     item_id = match[0]["id"]
     async with httpx.AsyncClient(timeout=TIMEOUT) as c:
         r = await c.delete(_url(f"{kind}/{item_id}"))
         r.raise_for_status()
     after = await _get_json(kind)
     if any(i.get(uuid_key) == uuid_value for i in after) or len(after) != len(items) - 1:
-        raise RuntimeError(f"delete of {uuid_value} not confirmed; re-check {kind} before retrying")
+        raise ToolError(f"delete of {uuid_value} not confirmed; re-check {kind} before retrying")
     return {"deleted": kind[:-1], uuid_key: uuid_value, "id_at_delete": item_id}
 
 
@@ -257,7 +297,7 @@ def _task_summary(t: dict) -> dict:
 
 # ---------------------------------------------------------------- read-only ---
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_status() -> dict:
     """Get the instrument's current status: battery, AC state, leveling, on-board
     storage, IMU, laser-pointer, WiFi config (passphrase masked), and the active
@@ -265,14 +305,14 @@ async def scanner_status() -> dict:
     return _redact(await _get_json("status"))
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_projects() -> list:
     """List all projects on the instrument (id, projectName, projectUUID,
     nextProjectScanID)."""
     return await _get_json("projects")
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_scans() -> list:
     """List all scans as compact records (id, scanUUID, scanMode, points, file
     path, and the project folder the scan belongs to). Ids are list positions
@@ -296,7 +336,7 @@ async def scanner_scans() -> list:
     return out
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_scan_modes() -> list:
     """List the available scan modes (the density/range/time menu): mode name,
     range (m), point count, file size, scan time (s), spacing, and rate.
@@ -304,20 +344,20 @@ async def scanner_scan_modes() -> list:
     return await _get_json("scans/modes")
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_errors() -> list:
     """Get the instrument's current error list (type, errorLevel, description)."""
     return await _get_json("errors")
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_tasks() -> list:
     """List running or queued tasks (e.g. a scan in progress) with their state
     and percent complete (0-100). An empty list means the instrument is idle."""
     return [_task_summary(t) for t in await _get_json("tasks")]
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_wait_for_scan(ctx: Context, timeout_s: int = 900, poll_s: float = 2.0) -> dict:
     """Wait until no task is running (use after scanner_launch_scan), polling the
     task list every `poll_s` seconds (0.5-30) for up to `timeout_s` (1-7200).
@@ -343,14 +383,14 @@ async def scanner_wait_for_scan(ctx: Context, timeout_s: int = 900, poll_s: floa
         await asyncio.sleep(poll_s)
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": True, "openWorldHint": True})
 async def scanner_scanfile_info(scan_file_id: int) -> dict:
     """Get metadata for one point-cloud file: file path, size, point count, and
     whether it has been downloaded."""
     return await _get_json(f"tzfs/{scan_file_id}")
 
 
-@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
 async def scanner_download_scanfile(
     scan_file_id: int, filename: str | None = None, overwrite: bool = False
 ) -> dict:
@@ -363,7 +403,7 @@ async def scanner_download_scanfile(
     return {"scanFileId": scan_file_id, "bytes": n, "path": path}
 
 
-@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
 async def scanner_download_preview(
     scan_file_id: int, filename: str | None = None, overwrite: bool = False
 ) -> dict:
@@ -375,7 +415,7 @@ async def scanner_download_preview(
     return {"scanFileId": scan_file_id, "bytes": n, "path": path}
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+@tool(annotations={"readOnlyHint": True, "openWorldHint": False})
 async def scanner_preview_to_angles(
     scan_filename: str, preview_filename: str,
     x0: int, y0: int, x1: int, y1: int, margin_deg: float = 0.5,
@@ -391,10 +431,10 @@ async def scanner_preview_to_angles(
     pw, ph = _jpeg_size(_existing_file(preview_filename))
     sx, sy = geo["cols"] / pw, geo["rows"] / ph
     if not (0 <= x0 <= pw and 0 <= x1 <= pw and 0 <= y0 < y1 <= ph):
-        raise ValueError(f"box must lie within the {pw}x{ph} preview with y0 < y1")
+        raise ToolError(f"box must lie within the {pw}x{ph} preview with y0 < y1")
     margin = math.radians(max(0.0, float(margin_deg)))
     if x1 == x0:
-        raise ValueError("box has zero width")
+        raise ToolError("box has zero width")
     width_px = x1 - x0 if x1 > x0 else x1 + pw - x0
     start_ha = (geo["start_ha"] + x0 * sx * geo["step_h"] - margin) % math.tau
     delta_ha = min(math.tau, width_px * sx * geo["step_h"] + 2 * margin)
@@ -414,7 +454,7 @@ async def scanner_preview_to_angles(
 
 if ALLOW_ACTUATION:
 
-    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
     async def scanner_create_project(project_name: str, project_uuid: str) -> dict:
         """Create a project on the instrument. Supply a projectName and a unique
         projectUUID (UUIDv4). Returns the created project record."""
@@ -424,7 +464,7 @@ if ALLOW_ACTUATION:
             r.raise_for_status()
             return r.json()
 
-    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
     async def scanner_launch_scan(project_name: str, project_uuid: str, scan_mode: str,
                                   color: bool = False) -> dict:
         """ACTUATING: start a full-dome scan — moves the instrument and fires its
@@ -442,7 +482,7 @@ if ALLOW_ACTUATION:
                               "projectUUID": project_uuid, "scanType": "FullDome",
                               "fastMode": False, "colorMode": "ON" if color else "OFF"})
 
-    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
     async def scanner_launch_area_scan(project_name: str, project_uuid: str, scan_mode: str,
                                        start_ha: float, delta_ha: float,
                                        start_va: float, delta_va: float,
@@ -454,9 +494,9 @@ if ALLOW_ACTUATION:
         start_ha, delta_ha = float(start_ha) % math.tau, float(delta_ha)
         start_va, delta_va = float(start_va), float(delta_va)
         if not 0 < delta_ha <= math.tau:
-            raise ValueError("delta_ha must be in (0, 2π]")
+            raise ToolError("delta_ha must be in (0, 2π]")
         if not (0 <= start_va <= math.pi and 0 < delta_va <= math.pi - start_va):
-            raise ValueError("need 0 <= start_va and 0 < delta_va with start_va + delta_va <= π")
+            raise ToolError("need 0 <= start_va and 0 < delta_va with start_va + delta_va <= π")
         await _check_idle()
         await _check_project(project_name, project_uuid)
         await _check_mode(scan_mode)
@@ -466,25 +506,25 @@ if ALLOW_ACTUATION:
                               "startHA": start_ha, "deltaHA": delta_ha,
                               "startVA": start_va, "deltaVA": delta_va})
 
-    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
     async def scanner_cancel_task(task_uuid: str) -> dict:
         """Cancel a running task (e.g. stop a scan in progress) by its taskUUID
         from scanner_tasks. The partial scan is discarded."""
         match = [t for t in await _get_json("tasks") if t.get("taskUUID") == task_uuid]
         if not match:
-            raise ValueError(f"no running task {task_uuid!r}; see scanner_tasks")
+            raise ToolError(f"no running task {task_uuid!r}; see scanner_tasks")
         status = await _cancel(match[0]["id"])
         if status >= 400:
-            raise RuntimeError(f"cancel refused (HTTP {status})")
+            raise ToolError(f"cancel refused (HTTP {status})")
         return {"cancelled": task_uuid, "status": status}
 
-    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
     async def scanner_delete_scan(scan_uuid: str) -> dict:
         """DESTRUCTIVE: permanently delete a scan (and its file), identified by its
         scanUUID from scanner_scans. Deletion is confirmed afterwards."""
         return await _delete_verified("scans", "scanUUID", scan_uuid)
 
-    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
+    @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
     async def scanner_delete_project(project_uuid: str) -> dict:
         """DESTRUCTIVE: permanently delete a project and its scans, identified by
         its projectUUID from scanner_projects. Deletion is confirmed afterwards."""

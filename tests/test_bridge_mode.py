@@ -119,7 +119,7 @@ def test_scan_waits_for_approval_then_succeeds(tools):
 def test_errors_carry_the_bridge_code(tools):
     with pytest.raises(tools.BridgeError, match="invalid_request"):
         run(fn(tools.scanner_start_scan)(tools._state["project_id"], "STD_L9"))
-    with pytest.raises(ValueError):
+    with pytest.raises(tools.ToolError):
         run(fn(tools.scanner_start_scan)(tools._state["project_id"], "STD_L2", start_ha=1.0))
 
 

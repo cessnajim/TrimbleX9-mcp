@@ -79,9 +79,11 @@ import scanner_mcp as m  # noqa: E402
 
 
 def call(name, **args):
-    """Tool result as plain data (FastMCP returns content blocks, or a
-    (content, structured) tuple in newer 1.x releases)."""
+    """Tool result as plain data (content blocks, a (content, structured) tuple in newer
+    1.x releases, or a CallToolResult in 2.x)."""
     r = asyncio.run(m.mcp.call_tool(name, args))
+    if hasattr(r, "content"):  # mcp 2.x: a CallToolResult
+        r = r.content
     if isinstance(r, tuple):
         return r[1].get("result", r[1]) if isinstance(r[1], dict) else r[1]
     return json.loads(r[0].text) if r else None
@@ -178,3 +180,8 @@ def test_status_masks_wifi_key():
     w = s["wifiConfiguration"]
     assert w["key"] == "***" and w["SSID"] == "SCANNER-1" and w["isFactoryKey"] is True
     assert "hunter2" not in json.dumps(s)
+
+
+def test_unreachable_instrument_is_a_readable_error(monkeypatch):
+    monkeypatch.setattr(m, "BASE", "http://127.0.0.1:9/api/v1")
+    assert "instrument unreachable" in raises("scanner_status")

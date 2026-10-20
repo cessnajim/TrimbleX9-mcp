@@ -12,12 +12,21 @@ Config:
   SCANNER_DOWNLOAD_DIR  Where downloads are written (default ~/scanner-downloads)
 """
 import asyncio
+import functools
+import inspect
 import math
 import os
 import time
 
 import httpx
-from mcp.server.fastmcp import Context, FastMCP, Image
+
+try:  # mcp 2.x renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import Context, Image
+    from mcp.server.mcpserver import MCPServer as FastMCP
+    from mcp.server.mcpserver.exceptions import ToolError
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import Context, FastMCP, Image
+    from mcp.server.fastmcp.exceptions import ToolError
 
 import scanner_mcp as direct  # download-path safety helpers
 
@@ -28,7 +37,38 @@ TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 mcp = FastMCP("trimblex9-bridge")
 
 
-class BridgeError(RuntimeError):
+def _http_error_text(e: httpx.HTTPError) -> str:
+    if isinstance(e, httpx.HTTPStatusError):
+        return f"HTTP {e.response.status_code} from {e.request.url}: {e.response.text[:200]}"
+    return f"bridge unreachable ({type(e).__name__}: {e})"
+
+
+def _tool_errors(fn):
+    """Report HTTP and connection failures as tool errors, whose text reaches
+    the client (mcp 2.x hides the text of other exceptions)."""
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def wrapper(*a, **k):
+            try:
+                return await fn(*a, **k)
+            except httpx.HTTPError as e:
+                raise ToolError(_http_error_text(e)) from e
+    else:
+        @functools.wraps(fn)
+        def wrapper(*a, **k):
+            try:
+                return fn(*a, **k)
+            except httpx.HTTPError as e:
+                raise ToolError(_http_error_text(e)) from e
+    return wrapper
+
+
+def tool(**kw):
+    """mcp.tool, with HTTP failures reported as tool errors."""
+    return lambda fn: mcp.tool(**kw)(_tool_errors(fn))
+
+
+class BridgeError(ToolError):
     """A bridge refusal, carrying its machine-readable code and hint."""
 
 
@@ -84,27 +124,27 @@ WRITE = {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True}
 # ------------------------------------------------------------------ status ---
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_status() -> dict:
     """Bridge and scanner state: connection, busy, battery, storage, leveling,
     whether the scanner moved since its last scan, and the queue length."""
     return await _call("GET", "/status")
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_scan_modes() -> list:
     """The scan modes: name, range (m), angular step (rad), full-dome point
     count, fixed overhead (s) and full-dome time (s). Use the names in scans."""
     return await _call("GET", "/scan-modes")
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_projects() -> list:
     """Projects on the scanner (project_id, name, scan_count)."""
     return await _call("GET", "/projects")
 
 
-@mcp.tool(annotations=WRITE)
+@tool(annotations=WRITE)
 async def scanner_create_project(name: str) -> dict:
     """Create a project (1-64 characters, no '/'). Returns its project_id."""
     return await _call("POST", "/projects", {"name": name})
@@ -113,7 +153,7 @@ async def scanner_create_project(name: str) -> dict:
 # ------------------------------------------------------------------- scans ---
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_scans(project_id: str | None = None) -> list:
     """Scans, newest first: scan_id, kind (full_dome or area), station, mode,
     point count, parent station scan for area scans, and timings when the
@@ -121,13 +161,13 @@ async def scanner_scans(project_id: str | None = None) -> list:
     return await _call("GET", "/scans", params={"project_id": project_id} if project_id else None)
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_scan(scan_id: str) -> dict:
     """One scan's record."""
     return await _call("GET", f"/scans/{scan_id}")
 
 
-@mcp.tool(annotations=WRITE)
+@tool(annotations=WRITE)
 async def scanner_start_scan(
     project_id: str, mode: str, color: bool = False,
     start_ha: float | None = None, delta_ha: float | None = None,
@@ -142,7 +182,7 @@ async def scanner_start_scan(
     scanner_wait_for_job."""
     window = [start_ha, delta_ha, start_va, delta_va]
     if any(v is not None for v in window) and not all(v is not None for v in window):
-        raise ValueError("give all four window angles for an area scan, or none for a full dome")
+        raise ToolError("give all four window angles for an area scan, or none for a full dome")
     body = {"project_id": project_id, "kind": "area" if window[0] is not None else "full_dome",
             "mode": mode, "color": color}
     if window[0] is not None:
@@ -156,14 +196,14 @@ async def scanner_start_scan(
 # -------------------------------------------------------------------- jobs ---
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_job(job_id: str) -> dict:
     """One job: state (awaiting_approval, queued, running, succeeded, failed,
     cancelled), phase, progress 0-1, result and any problem."""
     return await _call("GET", f"/jobs/{job_id}")
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_wait_for_job(ctx: Context, job_id: str, timeout_s: int = 900,
                                return_on_approval: bool = True) -> dict:
     """Wait for a job to finish, reporting progress when the client supports it.
@@ -192,7 +232,7 @@ async def scanner_wait_for_job(ctx: Context, job_id: str, timeout_s: int = 900,
         await asyncio.sleep(1.0)
 
 
-@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
 async def scanner_cancel_job(job_id: str) -> dict:
     """Cancel a job of yours. A running scan is stopped and its partial data
     discarded."""
@@ -202,7 +242,7 @@ async def scanner_cancel_job(job_id: str) -> dict:
 # ------------------------------------------------------------------ aiming ---
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_preview(scan_id: str) -> list:
     """Look at a scan's preview: a grey laser-intensity panorama (full dome)
     or close-up (area scan). Returns the image and its size in pixels; boxes
@@ -227,7 +267,7 @@ def _jpeg_dims(data: bytes) -> tuple[int, int]:
     return 0, 0
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_aim(reference_scan_id: str, x0: int, y0: int, x1: int, y1: int, margin_deg: float = 0.5) -> dict:
     """Turn a box drawn on a scan's preview (see scanner_preview) into an
     area-scan window. The reference scan must be from where the scanner stands
@@ -241,7 +281,7 @@ async def scanner_aim(reference_scan_id: str, x0: int, y0: int, x1: int, y1: int
 # ----------------------------------------------------------------- exports ---
 
 
-@mcp.tool(annotations=WRITE)
+@tool(annotations=WRITE)
 async def scanner_export(scan_id: str, format: str = "ply", intensity: str = "auto") -> dict:
     """Decode a scan to levelled points (format `ply` or `las`; intensity
     `auto`, `preview` or `none`). Returns a job; when it succeeds its result
@@ -249,14 +289,14 @@ async def scanner_export(scan_id: str, format: str = "ply", intensity: str = "au
     return await _call("POST", f"/scans/{scan_id}/exports", {"format": format, "intensity": intensity})
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_export_info(export_id: str) -> dict:
     """An export's point count, bounds and automatic checks (point count,
     levelled, coordinates, intensity source). Mention any failed check."""
     return await _call("GET", f"/exports/{export_id}")
 
 
-@mcp.tool(annotations=WRITE)
+@tool(annotations=WRITE)
 async def scanner_download_export(export_id: str, filename: str | None = None, overwrite: bool = False) -> dict:
     """Download an export into SCANNER_DOWNLOAD_DIR (plain file name; no paths)."""
     info = await _call("GET", f"/exports/{export_id}")
@@ -265,7 +305,7 @@ async def scanner_download_export(export_id: str, filename: str | None = None, o
     return {"export_id": export_id, "bytes": n, "path": dest}
 
 
-@mcp.tool(annotations=WRITE)
+@tool(annotations=WRITE)
 async def scanner_download_scanfile(scan_id: str, filename: str | None = None, overwrite: bool = False) -> dict:
     """Download a scan's raw file (.tzf) into SCANNER_DOWNLOAD_DIR."""
     dest = direct._dest(filename, f"{scan_id}.tzf", overwrite)
@@ -276,19 +316,19 @@ async def scanner_download_scanfile(scan_id: str, filename: str | None = None, o
 # ----------------------------------------------------------------- recipes ---
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_recipes() -> list:
     """Installed recipes (recipe_id, title, version, summary)."""
     return await _call("GET", "/recipes")
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_recipe(recipe_id: str) -> dict:
     """A recipe's inputs and steps (action, person and check steps)."""
     return await _call("GET", f"/recipes/{recipe_id}")
 
 
-@mcp.tool(annotations=WRITE)
+@tool(annotations=WRITE)
 async def scanner_start_run(recipe_id: str, project_id: str, inputs: dict | None = None) -> dict:
     """Start running a recipe in a project. The bridge executes its steps; it
     pauses with `waiting_for: approval` (a person must approve a scan) or
@@ -297,21 +337,21 @@ async def scanner_start_run(recipe_id: str, project_id: str, inputs: dict | None
     return await _call("POST", "/runs", {"recipe_id": recipe_id, "project_id": project_id, "inputs": inputs or {}})
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_run(run_id: str) -> dict:
     """A run: state, what it is waiting for, the current step, and each step's
     state, job and output."""
     return await _call("GET", f"/runs/{run_id}")
 
 
-@mcp.tool(annotations=WRITE)
+@tool(annotations=WRITE)
 async def scanner_advance_run(run_id: str, step_id: str, input: dict) -> dict:
     """Complete a person step with its `needs` (e.g. {"box": {"x0":…, "y0":…,
     "x1":…, "y1":…}} drawn on the `preview_of` step's preview)."""
     return await _call("POST", f"/runs/{run_id}/advance", {"step_id": step_id, "input": input})
 
 
-@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
+@tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
 async def scanner_cancel_run(run_id: str) -> dict:
     """Stop a run; a scan in flight is cancelled too."""
     return await _call("POST", f"/runs/{run_id}/cancel")
@@ -320,14 +360,14 @@ async def scanner_cancel_run(run_id: str) -> dict:
 # --------------------------------------------------------------------- log ---
 
 
-@mcp.tool(annotations=READ)
+@tool(annotations=READ)
 async def scanner_log(project_id: str | None = None, since: str | None = None) -> list:
     """The field log, oldest first (filter by project or RFC 3339 time)."""
     params = {k: v for k, v in (("project_id", project_id), ("since", since)) if v}
     return await _call("GET", "/log", params=params or None)
 
 
-@mcp.tool(annotations=WRITE)
+@tool(annotations=WRITE)
 async def scanner_add_note(text: str, project_id: str | None = None) -> dict:
     """Add an observation to the field log."""
     body = {"text": text}

@@ -146,7 +146,7 @@ python3 -m venv .venv
 .venv/bin/trimblex9-mcp                  # run (stdio)
 ```
 
-Requires `mcp>=1.2,<2`: the 2.x SDK renamed `FastMCP`; a port is planned.
+Works with `mcp` 1.x (`FastMCP`) and 2.x (`MCPServer`); CI tests both.
 
 ## License
 
