@@ -7,11 +7,12 @@ can query status, list projects/scans, read the scan‑mode menu, and download
 point‑cloud files — and, behind an explicit opt‑in, create projects and start
 full‑dome or area scans.
 
-**Clean‑room** interoperability: written from scratch against the instrument's
+**Interoperability** project: written from scratch against the instrument's
 network API, with behavior verified on a live instrument. No vendor code,
-firmware or vendor documentation is included or redistributed. Independent
-project, **not affiliated with or endorsed by Trimble Inc.**; "Trimble" and
-"X9" are trademarks of their respective owners.
+firmware or vendor documentation is included or redistributed. How the API
+knowledge was obtained is recorded in [PROVENANCE.md](PROVENANCE.md).
+Independent project, **not affiliated with or endorsed by Trimble Inc.**;
+"Trimble" and "X9" are trademarks of their respective owners.
 
 ## Install
 
