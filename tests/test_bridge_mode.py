@@ -94,7 +94,7 @@ def fn(tool):
 def test_tools_are_listed_without_operator_tools(tools):
     names = {t.name for t in run(tools.mcp.list_tools())}
     assert {"scanner_status", "scanner_start_scan", "scanner_preview", "scanner_aim", "scanner_export",
-            "scanner_start_run", "scanner_advance_run"} <= names
+            "scanner_start_run", "scanner_advance_run", "scanner_propose"} <= names
     assert not any("approve" in n or "grant" in n or "delete" in n for n in names)
 
 
@@ -145,7 +145,7 @@ def test_recipe_prompt_and_run(tools):
     if not recipes:
         pytest.skip("window recipe not found next to the binaries")
     text = run(fn(tools.run_recipe)("window-measurement", tools._state["project_id"]))
-    assert "Mark the window" in text and "scanner_advance_run" in text and "approve" in text
+    assert "Mark the window" in text and "scanner_propose" in text and "approve" in text
     r = run(fn(tools.scanner_start_run)("window-measurement", tools._state["project_id"], {"purpose": "blinds"}))
     for _ in range(100):
         r = run(fn(tools.scanner_run)(r["run_id"]))

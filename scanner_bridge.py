@@ -339,6 +339,20 @@ async def scanner_advance_run(run_id: str, step_id: str, input: dict) -> dict:
     return await _call("POST", f"/runs/{_seg(run_id)}/advance", {"step_id": step_id, "input": input})
 
 
+@tool(annotations=WRITE)
+async def scanner_propose(run_id: str, step_id: str, input: dict, note: str | None = None) -> dict:
+    """Propose a waiting person step's answer for a person to confirm, e.g. the
+    box around the window you found on the `preview_of` step's preview:
+    {"box": {"x0":…, "y0":…, "x1":…, "y1":…}} (x1 < x0 crosses the panorama
+    seam). Say in `note` what you found and how sure you are. The step keeps
+    waiting until a person confirms or changes it in the bridge app (bridge
+    0.3.0+); a newer proposal replaces an older one."""
+    body = {"step_id": step_id, "input": input}
+    if note:
+        body["note"] = note
+    return await _call("POST", f"/runs/{_seg(run_id)}/propose", body)
+
+
 @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
 async def scanner_cancel_run(run_id: str) -> dict:
     """Stop a run; a scan in flight is cancelled too."""
@@ -383,14 +397,17 @@ async def run_recipe(recipe_id: str, project_id: str) -> str:
     for n, s in enumerate(r["steps"], 1):
         how = {
             "action": f"the bridge calls {s.get('operation_id')} itself",
-            "person": "supply " + ", ".join(s.get("needs", [])) + " with scanner_advance_run"
-                      + (f" (look at scanner_preview of step {s['preview_of']}'s scan_id first)" if s.get("preview_of") else ""),
+            "person": "work out " + ", ".join(s.get("needs", [])) + " yourself"
+                      + (f" from scanner_preview of step {s['preview_of']}'s scan_id" if s.get("preview_of") else "")
+                      + ", then scanner_propose it with a note; the person confirms or adjusts it in the bridge app",
             "check": f"the bridge checks {', '.join(s.get('expect', []))} of step {s.get('of')}",
         }[s["kind"]]
         title = s.get("title") or s["step_id"]
         extra = f" — {s['instructions']}" if s.get("instructions") else ""
         lines.append(f"{n}. {title} [{s['kind']}: {how}]{extra}")
-    lines += ["", "When the run shows waiting_for = approval, ask the person to approve the scan in the bridge app.",
+    lines += ["", "AI-first: you find the window, choose the box and propose the measurement; the person only validates.",
+              "Use scanner_advance_run yourself only if the person tells you to go ahead without confirming.",
+              "When the run shows waiting_for = approval, ask the person to approve the scan in the bridge app.",
               "Report each measured value with its uncertainty, and say plainly if a check failed or a step was declined."]
     return "\n".join(lines)
 

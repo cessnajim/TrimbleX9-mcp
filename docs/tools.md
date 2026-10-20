@@ -155,6 +155,7 @@ ones the bridge returns; see the bridge's own documentation for full schemas.
 | `scanner_start_run` | write (its steps may queue scans) | `recipe_id` str; `project_id` str; `inputs` object, optional | Starts a run; the bridge executes the steps. It pauses with `waiting_for: approval` (a person must approve a scan) or `waiting_for: input` (a person step; supply its `needs` with `scanner_advance_run`). | `POST /runs` |
 | `scanner_run` | read | `run_id` str | State, what it is waiting for, current step, each step's state, job and output | `GET /runs/{id}` |
 | `scanner_advance_run` | write | `run_id` str; `step_id` str; `input` object | Completes a person step with its `needs`, e.g. `{"box": {"x0": …, "y0": …, "x1": …, "y1": …}}` drawn on the preview of the step named in `preview_of` | `POST /runs/{id}/advance` |
+| `scanner_propose` | write | `run_id` str; `step_id` str; `input` object; `note` str, optional | Proposes a waiting person step's `needs` (the agent's box, a measurement) for a person to confirm or change in the bridge app; the step keeps waiting. Bridge 0.3.0+ | `POST /runs/{id}/propose` |
 | `scanner_cancel_run` | **destructive** | `run_id` str | Stops the run; a scan in flight is cancelled too | `POST /runs/{id}/cancel` |
 | `scanner_log` | read | `project_id` str, optional; `since` str (RFC 3339), optional | The field log, oldest first | `GET /log` |
 | `scanner_add_note` | write | `text` str; `project_id` str, optional | Adds an observation to the field log | `POST /log` |
