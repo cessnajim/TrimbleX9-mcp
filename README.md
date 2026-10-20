@@ -33,6 +33,34 @@ Add `--env SCANNER_ALLOW_ACTUATION=1` (and `--env SCANNER_BASE=...`,
 `--env SCANNER_DOWNLOAD_DIR=...`) as needed. Run it on the host the instrument
 is connected to; a remote agent reaches it by running it there or over SSH.
 
+## Bridge mode
+
+When an x9 bridge service runs next to the scanner, point the server at it
+instead of at the scanner. The bridge is the only thing that talks to the
+scanner and enforces the rules for every client (approvals, battery, a busy
+scanner, request echo checks), so in this mode the tools are thin calls to its
+API, made with a token the bridge issued (usually role `agent`).
+
+```bash
+claude mcp add trimblex9 --env SCANNER_BRIDGE_URL=http://bridge.local:8795/v1 \
+  --env SCANNER_BRIDGE_TOKEN=<agent token> -- uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp trimblex9-mcp
+```
+
+Tools in bridge mode: `scanner_status`, `scanner_scan_modes`, `scanner_projects`,
+`scanner_create_project`, `scanner_scans`, `scanner_scan`, `scanner_start_scan`
+(full dome, or area with a window), `scanner_job`, `scanner_wait_for_job`,
+`scanner_cancel_job`, `scanner_preview` (returns the image, so the agent can
+look), `scanner_aim` (box on a preview → window), `scanner_export`,
+`scanner_export_info`, `scanner_download_export`, `scanner_download_scanfile`,
+`scanner_recipes`, `scanner_recipe`, `scanner_start_run`, `scanner_run`,
+`scanner_advance_run`, `scanner_cancel_run`, `scanner_log`, `scanner_add_note`,
+and the prompt `run_recipe(recipe_id, project_id)`.
+
+With an agent token, scans wait for a person's approval in the bridge app
+unless the person granted a set of scans; approval, grant and delete tools are
+deliberately absent. Errors carry the bridge's code and hint
+(e.g. `battery_low`, `instrument_moved`).
+
 ## Tools
 
 **Always available (read / query / download):**

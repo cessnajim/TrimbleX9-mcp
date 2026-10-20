@@ -15,6 +15,10 @@ Config:
                            ~/scanner-downloads). Download tools never write
                            outside it.
 
+Bridge mode: when SCANNER_BRIDGE_URL and SCANNER_BRIDGE_TOKEN are set, the
+server instead talks to an x9 bridge service, which enforces the rules for
+every client (see scanner_bridge.py).
+
 Transport: stdio (run under an MCP client). Independent project, not affiliated
 with any instrument manufacturer.
 """
@@ -29,7 +33,7 @@ import uuid as uuidlib
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 BASE = os.environ.get("SCANNER_BASE", "http://192.168.42.1:34567/api/v1").rstrip("/")
 ALLOW_ACTUATION = os.environ.get("SCANNER_ALLOW_ACTUATION", "").lower() in ("1", "true", "yes")
@@ -109,7 +113,7 @@ def _existing_file(filename: str) -> str:
 
 
 # ------------------------------------------------------- scan-file geometry -----
-# Observed .tzf layout (see the TrimbleX9-tzf project): u64 at 0x10 points to a
+# Observed .tzf layout (see the trimble-tzf project): u64 at 0x10 points to a
 # metadata block holding f64 angle steps (+0x10 horizontal, +0x18 vertical),
 # f64 start VA (+0x20, radians from zenith), f64 negated start HA (+0x28) and
 # u32 grid rows/cols (+0x30/+0x34).
@@ -488,6 +492,11 @@ if ALLOW_ACTUATION:
 
 
 def main() -> None:
+    if os.environ.get("SCANNER_BRIDGE_URL"):
+        import scanner_bridge
+
+        scanner_bridge.main()
+        return
     mcp.run()
 
 
