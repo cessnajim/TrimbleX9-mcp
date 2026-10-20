@@ -509,7 +509,8 @@ if ALLOW_ACTUATION:
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
     async def scanner_cancel_task(task_uuid: str) -> dict:
         """Cancel a running task (e.g. stop a scan in progress) by its taskUUID
-        from scanner_tasks. The partial scan is discarded."""
+        from scanner_tasks. The instrument still files the partial sweep as a scan;
+        check scanner_scans and delete it if it is not wanted."""
         match = [t for t in await _get_json("tasks") if t.get("taskUUID") == task_uuid]
         if not match:
             raise ToolError(f"no running task {task_uuid!r}; see scanner_tasks")

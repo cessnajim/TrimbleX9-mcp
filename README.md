@@ -1,11 +1,18 @@
 # TrimbleX9-mcp
 
 An [MCP](https://modelcontextprotocol.io) server for the **Trimble X9**
-terrestrial laser scanner: control and data‑retrieval tools over the
-instrument's local HTTP/REST API (`/api/v1`) on its USB or WiFi link. An agent
-can query status, list projects/scans, read the scan‑mode menu, and download
-point‑cloud files — and, behind an explicit opt‑in, create projects and start
-full‑dome or area scans.
+terrestrial laser scanner. It gives an AI agent tools to read the scanner's
+status, list projects and scans, read the scan-mode menu, download point-cloud
+files and previews, and, behind an explicit opt-in, create projects and start
+full-dome or area scans.
+
+It runs in one of two modes:
+
+- **Direct mode** talks to the scanner's own local HTTP/REST API (`/api/v1`)
+  over its USB or Wi-Fi link. The safety checks run in this server.
+- **Bridge mode** talks to a separate x9 bridge service that sits next to the
+  scanner and enforces the rules (approvals, battery, busy scanner, echo
+  checks) for every client. The tools are thin calls to the bridge's API.
 
 **Interoperability** project: written from scratch against the instrument's
 network API, with behavior verified on a live instrument. No vendor code,
@@ -14,139 +21,409 @@ knowledge was obtained is recorded in [PROVENANCE.md](PROVENANCE.md).
 Independent project, **not affiliated with or endorsed by Trimble Inc.**;
 "Trimble" and "X9" are trademarks of their respective owners.
 
+Contents: [Install](#install) · [Modes](#modes) ·
+[Configuration](#configuration) · [Tools](#tools) · [Safety](#safety) ·
+[Errors](#errors) · [Client configuration](#client-configuration) ·
+[Compatibility](#compatibility) · [Tests](#tests) · full tool reference in
+[docs/tools.md](docs/tools.md).
+
 ## Install
 
+Python 3.10 or later. Install from the GitHub release tag; this provides the
+console script `trimblex9-mcp`, which speaks MCP over stdio.
+
 ```bash
-uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.2 trimblex9-mcp
-# or
-pipx install git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.2
+pip install "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.0"
+# or, isolated:
+pipx install "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.0"
+# or run without installing:
+uvx --from "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.0" trimblex9-mcp
 # no git on the host (e.g. a minimal Raspberry Pi image):
-pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.1.2.tar.gz
+pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.3.0.tar.gz
 ```
 
-Register with an MCP client (read‑only):
+Dependencies: `mcp` and `httpx` (see [Compatibility](#compatibility)).
 
-```bash
-claude mcp add trimblex9 -- uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp@v0.1.2 trimblex9-mcp
-```
+`trimblex9-mcp` is meant to be started by an MCP client, not run by hand; on a
+terminal it just waits for MCP messages on stdin.
 
-Add `--env SCANNER_ALLOW_ACTUATION=1` (and `--env SCANNER_BASE=...`,
-`--env SCANNER_DOWNLOAD_DIR=...`) as needed. Run it on the host the instrument
-is connected to; a remote agent reaches it by running it there or over SSH.
+## Modes
 
-## Bridge mode
+The mode is chosen once, at start-up, from the environment:
 
-When an x9 bridge service runs next to the scanner, point the server at it
-instead of at the scanner. The bridge is the only thing that talks to the
-scanner and enforces the rules for every client (approvals, battery, a busy
-scanner, request echo checks), so in this mode the tools are thin calls to its
-API, made with a token the bridge issued (usually role `agent`).
+| `SCANNER_BRIDGE_URL` | `SCANNER_BRIDGE_TOKEN` | Result |
+|---|---|---|
+| unset or empty | (ignored) | **Direct mode**: talks to the scanner at `SCANNER_BASE`. |
+| set | set | **Bridge mode**: talks to the bridge at `SCANNER_BRIDGE_URL`. |
+| set | unset or empty | Exits at start-up with `bridge mode needs SCANNER_BRIDGE_URL and SCANNER_BRIDGE_TOKEN`. It does **not** fall back to direct mode. |
 
-```bash
-claude mcp add trimblex9 --env SCANNER_BRIDGE_URL=http://bridge.local:8795/v1 \
-  --env SCANNER_BRIDGE_TOKEN=<agent token> -- uvx --from git+https://github.com/cessnajim/TrimbleX9-mcp trimblex9-mcp
-```
+The two modes expose different tool sets (see [Tools](#tools)). In bridge mode
+`SCANNER_BASE` and `SCANNER_ALLOW_ACTUATION` are ignored: the bridge decides
+what a token may do.
 
-Tools in bridge mode: `scanner_status`, `scanner_scan_modes`, `scanner_projects`,
-`scanner_create_project`, `scanner_scans`, `scanner_scan`, `scanner_start_scan`
-(full dome, or area with a window), `scanner_job`, `scanner_wait_for_job`,
-`scanner_cancel_job`, `scanner_preview` (returns the image, so the agent can
-look), `scanner_aim` (box on a preview → window), `scanner_export`,
-`scanner_export_info`, `scanner_download_export`, `scanner_download_scanfile`,
-`scanner_recipes`, `scanner_recipe`, `scanner_start_run`, `scanner_run`,
-`scanner_advance_run`, `scanner_cancel_run`, `scanner_log`, `scanner_add_note`,
-and the prompt `run_recipe(recipe_id, project_id)`.
+### Direct mode
 
-With an agent token, scans wait for a person's approval in the bridge app
-unless the person granted a set of scans; approval, grant and delete tools are
-deliberately absent. Errors carry the bridge's code and hint
-(e.g. `battery_low`, `instrument_moved`).
+Run the server on the host the scanner is connected to (by USB, or on the
+scanner's Wi-Fi). Out of the box the server is **read-only**: tools that move
+the instrument, fire its laser or delete data are not registered at all
+unless `SCANNER_ALLOW_ACTUATION` is set. With it set, the server validates
+every scan request locally, refuses to start one while the scanner is busy,
+and cancels any scan the instrument did not accept exactly as sent.
+
+### Bridge mode
+
+The bridge is the only thing that talks to the scanner. This server sends
+each call to the bridge's HTTP API with a bearer token the bridge issued,
+usually with role `agent`. With an agent token, a scan waits in
+`awaiting_approval` until a person approves it in the bridge app, unless the
+person granted a set of scans in advance. Approval, grant and delete tools
+are deliberately absent from this server. Bridge mode adds exports to
+PLY/LAS, previews returned as images, aiming, recipes and a field log.
+
+The bridge itself is a separate service and is not part of this repository.
+
+## Configuration
+
+All configuration is through environment variables.
+
+| Variable | Mode | Default | Effect |
+|---|---|---|---|
+| `SCANNER_BASE` | direct | `http://192.168.42.1:34567/api/v1` | Base URL of the scanner's HTTP API. The default is the scanner over its USB network link; use its Wi-Fi address (e.g. `http://192.168.43.1:34567/api/v1`) when connected over Wi-Fi. A trailing `/` is removed. |
+| `SCANNER_ALLOW_ACTUATION` | direct | unset (off) | `1`, `true` or `yes` (any case) registers the actuating and destructive tools. Any other value, including `on`, leaves them unregistered. |
+| `SCANNER_DOWNLOAD_DIR` | both | `~/scanner-downloads` | Directory that download tools write into and that `scanner_preview_to_angles` reads from. `~` is expanded and the path is resolved (symlinks followed) at start-up. Created on first download. Nothing is written outside it. |
+| `SCANNER_BRIDGE_URL` | bridge | unset | Bridge API base, e.g. `http://bridge.local:8795/v1`. Setting it selects bridge mode. A trailing `/` is removed. |
+| `SCANNER_BRIDGE_TOKEN` | bridge | unset | Bearer token issued by the bridge, sent as `Authorization: Bearer <token>`. Required in bridge mode. |
+
+Timeouts are fixed in the code, not configurable:
+
+| Request | Direct mode | Bridge mode |
+|---|---|---|
+| Ordinary API calls | 15 s (5 s to connect) | 30 s (5 s to connect) |
+| File downloads (streamed) | 600 s (5 s to connect) | 600 s (5 s to connect) |
+| `scanner_preview` image | — | 120 s (5 s to connect) |
+
+The long-running waits (`scanner_wait_for_scan`, `scanner_wait_for_job`) poll
+and take their own `timeout_s` argument (1 to 7200 s, default 900).
 
 ## Tools
 
-**Always available (read / query / download):**
-- `scanner_status` — battery, leveling, storage, wifi (passphrase masked), errors
-- `scanner_projects` — list projects
-- `scanner_scans` — list scans (compact: id, scanUUID, mode, points, file, project)
-- `scanner_scan_modes` — the scan‑mode menu (density / range / time)
-- `scanner_errors` — current error list
-- `scanner_tasks` — running tasks with state and **percent complete**; empty = idle
-- `scanner_wait_for_scan(timeout_s=900, poll_s=2)` — block until the instrument
-  is idle, reporting progress to the client when supported
-- `scanner_scanfile_info(id)` — point‑cloud file metadata
-- `scanner_download_scanfile(id, filename=None, overwrite=False)` — download a point cloud
-- `scanner_download_preview(id, filename=None, overwrite=False)` — download the preview JPEG
-- `scanner_preview_to_angles(scan_filename, preview_filename, x0, y0, x1, y1, margin_deg=0.5)`
-  — turn a box on a downloaded preview into area‑scan angles (local, no instrument call)
+A summary; parameters, return values and rules for each tool are in
+**[docs/tools.md](docs/tools.md)**.
 
-**Only when `SCANNER_ALLOW_ACTUATION` is truthy (moves the instrument / destructive):**
-- `scanner_launch_scan(project_name, project_uuid, scan_mode, color=False)` — full‑dome scan
-- `scanner_launch_area_scan(project_name, project_uuid, scan_mode, start_ha, delta_ha, start_va, delta_va, color=False)`
-- `scanner_cancel_task(task_uuid)` — stop a running scan (the partial scan is discarded)
-- `scanner_create_project(project_name, project_uuid)`
-- `scanner_delete_scan(scan_uuid)` · `scanner_delete_project(project_uuid)`
+"Read" tools only query. "Local write" tools write files into
+`SCANNER_DOWNLOAD_DIR` but do not change the scanner. "Actuating" tools move
+the instrument or fire its laser. "Destructive" tools stop work or delete
+data. Each tool carries matching MCP annotations (`readOnlyHint`,
+`destructiveHint`).
 
-By default these are **not registered**, so an agent sees a read‑only server.
-A typical scan is `scanner_launch_scan` → `scanner_wait_for_scan` →
+### Direct mode, always registered
+
+| Tool | Kind | What it does |
+|---|---|---|
+| `scanner_status` | read | Battery, AC, levelling, storage, IMU, laser pointer, Wi-Fi config (secrets masked), errors |
+| `scanner_projects` | read | List projects |
+| `scanner_scans` | read | List scans as compact records |
+| `scanner_scan_modes` | read | The scan-mode menu (range, points, size, time, spacing, rate) |
+| `scanner_errors` | read | Current error list |
+| `scanner_tasks` | read | Running or queued tasks with percent complete; empty means idle |
+| `scanner_wait_for_scan` | read | Wait until no task is running, reporting progress |
+| `scanner_scanfile_info` | read | Metadata of one point-cloud file |
+| `scanner_download_scanfile` | local write | Download a scan's `.tzf` point-cloud file |
+| `scanner_download_preview` | local write | Download a scan's preview JPEG |
+| `scanner_preview_to_angles` | read (local only) | Turn a box on a downloaded preview into area-scan angles |
+
+### Direct mode, only with `SCANNER_ALLOW_ACTUATION`
+
+| Tool | Kind | What it does |
+|---|---|---|
+| `scanner_create_project` | write | Create a project |
+| `scanner_launch_scan` | **actuating** | Start a full-dome scan |
+| `scanner_launch_area_scan` | **actuating** | Start a scan of an angular window |
+| `scanner_cancel_task` | **destructive** | Stop a running task |
+| `scanner_delete_scan` | **destructive** | Delete a scan and its file, by scanUUID |
+| `scanner_delete_project` | **destructive** | Delete a project and its scans, by projectUUID |
+
+A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
+`scanner_create_project`) → `scanner_launch_scan` → `scanner_wait_for_scan` →
 `scanner_scans` → `scanner_download_scanfile`.
 
-### Launch safety
+### Bridge mode
 
-Launches are refused while any task is running or queued, since another
-client may be using the instrument. The instrument accepts (HTTP 202) requests it cannot parse and then runs a
-default full‑dome scan, and it ignores `projectUUID` unless `projectName` also
-matches. So the launch tools check the project (name **and** UUID), the scan
-mode and the angles before sending anything, then compare the request the
-instrument echoes back with what was sent; on any mismatch the task is
-cancelled immediately and the tool returns an error.
+| Tool | Kind | What it does |
+|---|---|---|
+| `scanner_status` | read | Bridge and scanner state: connection, busy, battery, storage, levelling, moved-since-last-scan, queue length |
+| `scanner_scan_modes` | read | Scan modes with range, angular step, point count and timings |
+| `scanner_projects` | read | Projects with scan counts |
+| `scanner_create_project` | write | Create a project by name |
+| `scanner_scans` | read | Scans, newest first, optionally for one project |
+| `scanner_scan` | read | One scan's record |
+| `scanner_start_scan` | **actuating** (queued; usually needs approval) | Queue a full-dome or area scan |
+| `scanner_job` | read | One job's state and progress |
+| `scanner_wait_for_job` | read | Wait for a job, returning early if it needs approval |
+| `scanner_cancel_job` | **destructive** | Cancel a job; a running scan is stopped |
+| `scanner_preview` | read | A scan's preview, returned as an image the agent can see |
+| `scanner_aim` | read | Turn a box on a preview into an area-scan window |
+| `scanner_export` | write (on the bridge) | Decode a scan to levelled PLY or LAS |
+| `scanner_export_info` | read | An export's point count, bounds and checks |
+| `scanner_download_export` | local write | Download an export file |
+| `scanner_download_scanfile` | local write | Download a scan's raw `.tzf` |
+| `scanner_recipes` | read | Installed recipes |
+| `scanner_recipe` | read | One recipe's inputs and steps |
+| `scanner_start_run` | write (may lead to scans) | Start running a recipe |
+| `scanner_run` | read | A run's state and steps |
+| `scanner_advance_run` | write | Complete a person step of a run |
+| `scanner_cancel_run` | **destructive** | Stop a run and any scan in flight |
+| `scanner_log` | read | The field log |
+| `scanner_add_note` | write | Add a note to the field log |
 
-### Area scans
+### Prompt (bridge mode)
 
-Angles are radians: HA is horizontal (0..2π), VA is measured down from the
-zenith (0..π). A full‑dome scan file records the angles of its first row and
-column, so a region picked on its preview maps straight to instrument angles
-while the instrument stays on the same station:
+| Prompt | Arguments | What it does |
+|---|---|---|
+| `run_recipe` | `recipe_id`, `project_id` | Fetches the recipe from the bridge and returns step-by-step instructions for walking it with the person: which inputs to ask for, then `scanner_start_run` and `scanner_run`, how each `action` / `person` / `check` step is handled, to ask for approval when the run waits for it, and to report measured values with their uncertainty. |
 
-1. `scanner_launch_scan` (any mode) → `scanner_wait_for_scan`
-2. `scanner_download_scanfile` + `scanner_download_preview` of that scan
-3. pick a box on the preview → `scanner_preview_to_angles`
-4. `scanner_launch_area_scan` with those angles
+Direct mode has no prompts.
 
-Area scans are saved as `<station>_<n>.tzf` next to the station's full‑dome
-scan. A small window without color takes about a minute, mostly leveling.
+## Safety
 
-### Deleting by UUID
+### Read-only by default (direct mode)
 
-Scan and project `id`s are list positions and are renumbered after every
-delete, so the delete tools take the stable `scanUUID` / `projectUUID`, resolve
-the current id immediately before deleting, and confirm afterwards that exactly
-that record is gone.
+Without `SCANNER_ALLOW_ACTUATION` the actuating and destructive tools are not
+registered, so a client sees a read-only server and cannot call them. Starting
+a scan moves the instrument and fires its laser; make sure the instrument is
+safely set up before enabling them.
 
-### Downloads stay in one directory
+### Launch checks (direct mode)
 
-Download tools write **only** inside `SCANNER_DOWNLOAD_DIR`. They take a plain
-file name (letters, digits, `.`, `_`, `-`; default `scan-<id>.tzf` /
-`scan-<id>-preview.jpg`). Paths, `..`, leading dots and symlinks that escape the
-directory are rejected, and existing files are kept unless `overwrite=true`.
-Files are written to a `.part` temp file and renamed when complete.
+The scanner answers HTTP 202 even to a scan request it cannot parse, and then
+runs a default full-dome scan. It also ignores `projectUUID` unless
+`projectName` matches too. So `scanner_launch_scan` and
+`scanner_launch_area_scan`, in this order:
 
-## Config (env)
+1. **Validate the angles** (area scan): `delta_ha` in (0, 2π],
+   `0 ≤ start_va`, `0 < delta_va`, `start_va + delta_va ≤ π`. `start_ha` is
+   wrapped into [0, 2π).
+2. **Refuse while busy**: if any task is running or queued, they fail with
+   `instrument is busy: <type> <taskUUID> (<state>)…` and send nothing. Another
+   client, or another agent, may be driving the instrument.
+3. **Check the project**: `project_uuid` must parse as a UUID, and a project
+   with that name **and** that UUID must exist.
+4. **Check the mode**: `scan_mode` must be one of the names in
+   `scanner_scan_modes`.
+5. **Send, then compare the echo**: the instrument echoes the request it
+   accepted. Every field sent (`scanMode`, `projectName`, `projectUUID`,
+   `scanType`, `fastMode`, `colorMode`, and the four angles for an area scan)
+   must come back unchanged (floats to within 1e-9). On any mismatch the
+   server **cancels the task at once** and returns
+   `instrument did not accept the request as sent (sent vs echoed: …);
+   cancelled its task (HTTP <status>)`.
 
-- `SCANNER_BASE` — API base URL. Default `http://192.168.42.1:34567/api/v1`
-  (the instrument over its USB network link; use its WiFi‑AP address otherwise).
-- `SCANNER_ALLOW_ACTUATION` — set to `1` to enable the actuating/destructive tools.
-- `SCANNER_DOWNLOAD_DIR` — where downloads go. Default `~/scanner-downloads`.
+The busy check covers only the launch tools; creating projects and deleting
+scans or projects do not check for running tasks.
 
-## Development
+### Delete by UUID, verified (direct mode)
+
+Scan and project `id`s on the scanner are list positions and are renumbered
+after every delete. The delete tools therefore take the stable `scanUUID` or
+`projectUUID`, look up its current `id` immediately before deleting, and read
+the list again afterwards. The delete is reported as done only if that UUID is
+gone and the list is exactly one shorter; otherwise the tool fails with
+`delete of <uuid> not confirmed; re-check <kind> before retrying`.
+
+### Downloads stay in one directory (both modes)
+
+Download tools write only inside `SCANNER_DOWNLOAD_DIR`:
+
+- `filename` must be a plain name: it starts with a letter or digit, then up
+  to 127 more letters, digits, `.`, `_` or `-`. No directories, no `..`, no
+  leading dot.
+- The resolved path must sit directly in the download directory, so a symlink
+  that points elsewhere is refused.
+- An existing file is kept unless `overwrite=true`.
+- Data streams into `<name>.part` and is renamed into place only when complete;
+  the `.part` file is removed on failure.
+
+`scanner_preview_to_angles` reads files only from the same directory, by plain
+name.
+
+### Secrets masked (direct mode)
+
+The scanner returns its Wi-Fi passphrase in plain text in its status.
+`scanner_status` replaces every non-empty string value whose key ends in
+`key`, `psk`, `passphrase`, `password`, `secret` or `token` (any case) with
+`***`, at any depth. Booleans such as `isFactoryKey` are kept. Only
+`scanner_status` is masked. In bridge mode the bridge decides what its status
+contains.
+
+### Bridge mode
+
+The bridge enforces approvals, battery limits, a busy scanner, a scanner that
+moved since the reference scan, and request echo checks, for every client.
+This server adds only input shape checks (for example, all four window angles
+or none) and the download-directory rules above.
+
+## Errors
+
+Tool failures are raised as MCP tool errors (`ToolError`), so the message text
+reaches the client on both mcp 1.x and mcp 2.x (mcp 2.x hides the text of
+other exceptions). The messages are:
+
+| Situation | Message |
+|---|---|
+| Scanner answered with an HTTP error (direct) | `HTTP <status> from <url>: <first 200 chars of body>` |
+| Scanner unreachable (direct) | `instrument unreachable (<ErrorType>: <detail>)` |
+| Bridge refused (bridge) | `<code>: <title> — <detail> (hint: <hint>)`, from the bridge's problem response, e.g. `battery_low`, `instrument_moved`, `invalid_request` |
+| Bridge answered an error without a JSON body | `HTTP <status>: <first 200 chars of body>` |
+| Bridge unreachable (bridge) | `bridge unreachable (<ErrorType>: <detail>)` |
+| Validation, busy, echo, delete and file-name checks | A plain sentence saying what was wrong and what to do, e.g. `unknown scan_mode 'X'; valid: …`, `<path> already exists; pass overwrite=true to replace it` |
+
+## Client configuration
+
+### Claude Code
+
+Direct mode, read-only:
+
+```bash
+claude mcp add trimblex9 -- trimblex9-mcp
+```
+
+Direct mode with actuation and custom paths:
+
+```bash
+claude mcp add trimblex9 \
+  --env SCANNER_ALLOW_ACTUATION=1 \
+  --env SCANNER_BASE=http://192.168.43.1:34567/api/v1 \
+  --env SCANNER_DOWNLOAD_DIR=$HOME/scans \
+  -- trimblex9-mcp
+```
+
+Without installing first:
+
+```bash
+claude mcp add trimblex9 -- uvx --from "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.0" trimblex9-mcp
+```
+
+Bridge mode:
+
+```bash
+claude mcp add trimblex9 \
+  --env SCANNER_BRIDGE_URL=http://bridge.local:8795/v1 \
+  --env SCANNER_BRIDGE_TOKEN=<agent token> \
+  -- trimblex9-mcp
+```
+
+### Generic `mcpServers` JSON
+
+For clients configured with an `mcpServers` object (Claude Desktop, many
+others):
+
+```json
+{
+  "mcpServers": {
+    "trimblex9": {
+      "command": "trimblex9-mcp",
+      "env": {
+        "SCANNER_BASE": "http://192.168.42.1:34567/api/v1",
+        "SCANNER_DOWNLOAD_DIR": "/home/user/scanner-downloads"
+      }
+    }
+  }
+}
+```
+
+Add `"SCANNER_ALLOW_ACTUATION": "1"` to `env` to enable actuation. For bridge
+mode, set `SCANNER_BRIDGE_URL` and `SCANNER_BRIDGE_TOKEN` instead. If
+`trimblex9-mcp` is not on the client's `PATH`, give its full path (for a
+virtualenv, `<venv>/bin/trimblex9-mcp`).
+
+### On a remote host over SSH (e.g. a Raspberry Pi by the scanner)
+
+The scanner is usually plugged into a small computer on site, not into the
+machine running the agent. Install the server on that host and let the client
+start it over SSH; MCP's stdio transport passes through `ssh` unchanged.
+
+```bash
+# on the Pi
+pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.3.0.tar.gz
+
+# on the agent's machine
+claude mcp add trimblex9 -- ssh -T pi@scanner-pi.local \
+  'SCANNER_DOWNLOAD_DIR=$HOME/scanner-downloads ~/.local/bin/trimblex9-mcp'
+```
+
+```json
+{
+  "mcpServers": {
+    "trimblex9": {
+      "command": "ssh",
+      "args": ["-T", "pi@scanner-pi.local",
+               "SCANNER_ALLOW_ACTUATION=1 ~/.local/bin/trimblex9-mcp"]
+    }
+  }
+}
+```
+
+Notes:
+
+- Set the environment variables **in the remote command**, as above. A
+  client's `--env` / `"env"` applies to the local `ssh` process and is not
+  forwarded to the remote host.
+- Use key-based login with no password prompt (`ssh -T` and no TTY); the
+  client cannot answer prompts.
+- On current Raspberry Pi OS and Debian the system `pip` refuses to install
+  into the system Python; use `pipx` or a virtualenv, and point the command
+  at that `trimblex9-mcp`.
+- Downloaded files land on the remote host, in its `SCANNER_DOWNLOAD_DIR`.
+- Use the full path to `trimblex9-mcp` if the remote non-interactive shell's
+  `PATH` does not include it.
+
+## Compatibility
+
+| Item | Supported |
+|---|---|
+| Python | 3.10 and later |
+| `mcp` SDK | 1.x (`FastMCP`, 1.7 or later, see below) and 2.x (`MCPServer`); the import is chosen at run time |
+| `httpx` | 0.27 and later |
+| OS | Linux and macOS (anything that can reach the scanner's network link) |
+| Transport | stdio |
+
+CI runs the tests on Python 3.10 with the newest mcp 1.x and on Python 3.13
+with mcp 2.x. The tools use tool annotations, which `FastMCP` accepts from
+mcp 1.7, so the requirement is `mcp>=1.7,<3`.
+
+## Tests
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e . pytest
-.venv/bin/pytest -q                      # offline tests against a stub instrument
-.venv/bin/trimblex9-mcp                  # run (stdio)
+.venv/bin/pytest -q
 ```
 
-Works with `mcp` 1.x (`FastMCP`) and 2.x (`MCPServer`); CI tests both.
+| Test file | Needs | Covers |
+|---|---|---|
+| `tests/test_offline.py` | nothing (starts an in-process stub of the scanner API) | Direct mode with actuation on: delete by UUID across renumbering, local launch validation, area-scan echo check, cancel on a mismatched echo, `scanner_preview_to_angles` including the seam wrap, refusal while busy, Wi-Fi key masking, readable error when unreachable |
+| `tests/test_bridge_mode.py` | `X9_BRIDGE_BIN` | Bridge mode against a real bridge and scanner simulator: tool list has no approve/grant/delete tools, approval flow and progress, bridge error codes, recipe prompt and run, field log |
+
+Bridge-mode tests are skipped unless these are set:
+
+| Variable | Effect |
+|---|---|
+| `X9_BRIDGE_BIN` | Directory holding the `x9-bridge` and `x9-mock` binaries (from the bridge project's `cargo build --release`). The tests start both on `127.0.0.1:34611` and `127.0.0.1:8811`. The recipe test also needs the bridge project's test recipe at `<bin>/../../crates/x9-bridge/tests/recipes/window-measurement.toml`, and is skipped without it. |
+| `X9_FIXTURES` | Directory of dome/area `.tzf` and `.jpg` fixtures for the simulator. With it, the preview, aim and export test runs too. |
+
+```bash
+X9_BRIDGE_BIN=/path/to/bridge/target/release pytest -q tests/test_bridge_mode.py
+```
+
+## Development
+
+```bash
+.venv/bin/trimblex9-mcp        # run over stdio
+python scanner_mcp.py          # same, from a checkout
+```
+
+`scanner_mcp.py` is direct mode and the entry point; `scanner_bridge.py` is
+bridge mode and reuses the download-path helpers from `scanner_mcp.py`.
 
 ## License
 

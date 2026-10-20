@@ -1,0 +1,193 @@
+# Tool reference
+
+Every tool of both modes, with its parameters, what it returns and the rules
+it applies. See the [README](../README.md) for installation, mode selection,
+configuration and the safety design.
+
+Kinds: **read** only queries; **local write** writes into
+`SCANNER_DOWNLOAD_DIR` and leaves the scanner unchanged; **write** changes data
+on the scanner or bridge without moving the instrument; **actuating** moves
+the instrument and fires its laser; **destructive** stops work or deletes data.
+
+Angles are radians throughout. HA is the horizontal angle, 0..2π. VA is the
+vertical angle measured down from the zenith, 0..π.
+
+- [Direct mode](#direct-mode)
+  - [Always registered](#always-registered)
+  - [Only with SCANNER_ALLOW_ACTUATION](#only-with-scanner_allow_actuation)
+  - [Aiming an area scan](#aiming-an-area-scan-direct-mode)
+- [Bridge mode](#bridge-mode)
+  - [Prompt: run_recipe](#prompt-run_recipe)
+
+## Direct mode
+
+The server talks to the scanner's HTTP API at `SCANNER_BASE`. Paths below are
+relative to it.
+
+### Always registered
+
+| Tool | Kind | Parameters | Returns |
+|---|---|---|---|
+| `scanner_status` | read | — | The scanner's status (battery, AC state, levelling, on-board storage, IMU, laser pointer, Wi-Fi configuration, active error list), with secret-looking fields masked as `***`. `GET status` |
+| `scanner_projects` | read | — | List of projects: `id`, `projectName`, `projectUUID`, `nextProjectScanID`. `GET projects` |
+| `scanner_scans` | read | — | List of compact scan records (below). `GET scans` |
+| `scanner_scan_modes` | read | — | The scan-mode menu: mode name, range (m), point count, file size, scan time (s), spacing, rate. Use the names in launches. `GET scans/modes` |
+| `scanner_errors` | read | — | Current errors: `type`, `errorLevel`, `description`. `GET errors` |
+| `scanner_tasks` | read | — | Running or queued tasks: `id`, `taskUUID`, `type`, `state`, `percent` (0–100), `scanID`, `exitResult`. Empty list = idle. `GET tasks` |
+| `scanner_wait_for_scan` | read | `timeout_s` int = 900 (clamped 1–7200); `poll_s` float = 2.0 (clamped 0.5–30) | Polls `tasks` until it is empty or the timeout passes. Sends MCP progress notifications (percent of the first task) when the client asked for them. Returns `{done, timed_out, elapsed_s, last}`; `last` is the last task snapshot seen (`null` if the scanner was already idle). |
+| `scanner_scanfile_info` | read | `scan_file_id` int | Metadata of one point-cloud file: path, size, point count, whether downloaded. `GET tzfs/{id}` |
+| `scanner_download_scanfile` | local write | `scan_file_id` int; `filename` str = `scan-<id>.tzf`; `overwrite` bool = false | Streams the `.tzf` into the download directory. Returns `{scanFileId, bytes, path}`. `GET tzfs/{id}/file` |
+| `scanner_download_preview` | local write | `scan_file_id` int; `filename` str = `scan-<id>-preview.jpg`; `overwrite` bool = false | Streams the scan's panoramic preview JPEG into the download directory. Returns `{scanFileId, bytes, path}`. `GET tzfs/{id}/preview` |
+| `scanner_preview_to_angles` | read (local only, no scanner call) | `scan_filename`, `preview_filename` (plain names in the download directory); `x0`, `y0`, `x1`, `y1` int (preview pixels, y down); `margin_deg` float = 0.5 | Area-scan angles for a box on the preview. Returns `start_ha`, `delta_ha`, `start_va`, `delta_va` (radians, 6 decimals), `degrees: {ha: [start, delta], va: [start, delta]}`, and `preview_cells_per_px: [x, y]`. |
+
+**`scanner_scans` records**
+
+| Field | Meaning |
+|---|---|
+| `id` | List position on the scanner. Changes when scans are deleted. |
+| `scanUUID` | Stable identifier. Use it for `scanner_delete_scan`. |
+| `scanMode` | Mode the scan was taken with. |
+| `nbPoints` | Point count of its file. |
+| `fileSizeMB` | File size in MB (10⁶ bytes), one decimal. |
+| `scanFileId` | Id of the point-cloud file. **This** is the `scan_file_id` for `scanner_scanfile_info` and the download tools; it is not the same as `id`. |
+| `file` | File path on the scanner, `<project folder>/<name>.tzf`. |
+| `project` | The project folder (the part of `file` before the first `/`), or `null`. |
+| `downloaded` | The scanner's own downloaded flag for the file. |
+
+**Download rules** (both download tools): `filename` must be a plain name
+(starts with a letter or digit, then up to 127 letters, digits, `.`, `_`,
+`-`; no `..`). The target must resolve directly inside the download
+directory. Existing files are kept unless `overwrite` is true. Data streams to
+`<name>.part` and is renamed when complete.
+
+**`scanner_preview_to_angles` rules**
+
+- Both files must already be in the download directory: the `.tzf` and the
+  preview of the **same** scan, taken from the station the instrument is still
+  standing on. The tool reads the grid size, angle steps and start angles from
+  the `.tzf` and the image size from the JPEG.
+- The box must lie inside the preview with `y0 < y1`. `x1 < x0` means the box
+  wraps across the panorama seam. `x1 == x0` is refused.
+- `margin_deg` (negative values count as 0) pads every side.
+- `start_ha` wraps into [0, 2π); `delta_ha` is capped at 2π; VA is clamped to
+  [0, π].
+
+### Only with `SCANNER_ALLOW_ACTUATION`
+
+These are not registered unless `SCANNER_ALLOW_ACTUATION` is `1`, `true` or
+`yes`.
+
+| Tool | Kind | Parameters | Returns / behaviour |
+|---|---|---|---|
+| `scanner_create_project` | write | `project_name` str; `project_uuid` str (supply a fresh UUIDv4) | `POST projects` with `{projectName, projectUUID}`; returns the created record. The UUID format and name uniqueness are not checked by this server. |
+| `scanner_launch_scan` | **actuating** | `project_name` str; `project_uuid` str; `scan_mode` str (from `scanner_scan_modes`); `color` bool = false (also capture images; slower) | Full-dome scan. Runs the launch checks, then `POST scans` with `scanType: FullDome`, `fastMode: false`, `colorMode: ON/OFF`. Returns the task summary (as in `scanner_tasks`). Follow with `scanner_wait_for_scan`. |
+| `scanner_launch_area_scan` | **actuating** | as `scanner_launch_scan`, plus `start_ha`, `delta_ha`, `start_va`, `delta_va` float (radians; get them from `scanner_preview_to_angles`) | Scan of an angular window: `scanType: AreaScan` with `startHA`, `deltaHA`, `startVA`, `deltaVA`. Same checks. A small window without color takes about a minute, mostly levelling. Area scans are saved as `<station>_<n>.tzf` next to the station's full-dome scan. |
+| `scanner_cancel_task` | **destructive** | `task_uuid` str (from `scanner_tasks`) | Looks up the task's current `id` and sends `DELETE tasks/{id}`. Returns `{cancelled, status}`; fails if no such task is running or the scanner answers 400 or above. See the note below on partial scans. |
+| `scanner_delete_scan` | **destructive** | `scan_uuid` str (from `scanner_scans`) | Permanently deletes the scan and its file, by UUID, verified. Returns `{deleted: "scan", scanUUID, id_at_delete}`. |
+| `scanner_delete_project` | **destructive** | `project_uuid` str (from `scanner_projects`) | Permanently deletes the project and its scans, by UUID, verified. Returns `{deleted: "project", projectUUID, id_at_delete}`. |
+
+**Launch checks**, in order (both launch tools): angle ranges (area scan:
+`delta_ha` in (0, 2π], `0 ≤ start_va`, `0 < delta_va`,
+`start_va + delta_va ≤ π`; `start_ha` is wrapped into [0, 2π)); refuse if any
+task is running or queued; `project_uuid` parses as a UUID and a project with
+that name **and** UUID exists; `scan_mode` is a known mode. Nothing is sent
+until all pass. After sending, every field must be echoed back unchanged in
+the task's `scanRequest`, or the task is cancelled at once and the tool fails.
+
+**Delete verification**: the tool lists scans or projects, finds exactly one
+record with the UUID, deletes it by its current `id`, lists again, and
+succeeds only if the UUID is gone and the list is one shorter.
+
+**Cancelling a scan**: the scan stops, but the instrument still files the
+partial sweep as a scan with a valid `.tzf` (confirmed on a real X9, see
+[PROVENANCE.md](../PROVENANCE.md)). Check `scanner_scans` after cancelling
+and delete the partial scan if it is not wanted.
+
+### Aiming an area scan (direct mode)
+
+A full-dome scan file records the angles of its first row and column, so a
+region picked on its preview maps straight to instrument angles while the
+instrument stays on the same station:
+
+1. `scanner_launch_scan` (any mode) → `scanner_wait_for_scan`
+2. `scanner_scans` to find the new scan's `scanFileId`
+3. `scanner_download_scanfile` and `scanner_download_preview` of that file
+4. Pick a box on the preview → `scanner_preview_to_angles`
+5. `scanner_launch_area_scan` with the four returned angles
+
+If the instrument is moved, take a new full-dome scan before aiming again.
+
+## Bridge mode
+
+Every tool is one call to the bridge's API at `SCANNER_BRIDGE_URL` with
+`Authorization: Bearer <SCANNER_BRIDGE_TOKEN>`. The bridge applies its rules
+and returns problem responses that this server turns into
+`<code>: <title> — <detail> (hint: <hint>)` errors. Fields named below are the
+ones the bridge returns; see the bridge's own documentation for full schemas.
+
+| Tool | Kind | Parameters | Returns / behaviour | Bridge call |
+|---|---|---|---|---|
+| `scanner_status` | read | — | Connection, busy, battery, storage, levelling, whether the scanner moved since its last scan, queue length | `GET /status` |
+| `scanner_scan_modes` | read | — | Modes: name, range (m), angular step (rad), full-dome point count, fixed overhead (s), full-dome time (s) | `GET /scan-modes` |
+| `scanner_projects` | read | — | Projects: `project_id`, `name`, `scan_count` | `GET /projects` |
+| `scanner_create_project` | write | `name` str (1–64 characters, no `/`; checked by the bridge) | The project, with its `project_id` | `POST /projects` |
+| `scanner_scans` | read | `project_id` str, optional | Scans, newest first: `scan_id`, `kind` (`full_dome` or `area`), station, mode, point count, parent station scan for area scans, timings when the bridge ran them | `GET /scans[?project_id=]` |
+| `scanner_scan` | read | `scan_id` str | One scan record | `GET /scans/{id}` |
+| `scanner_start_scan` | **actuating** (queued) | `project_id` str; `mode` str; `color` bool = false (adds about 150 s); `start_ha`, `delta_ha`, `start_va`, `delta_va` float, optional; `note` str, optional | Queues a scan and returns the job. No window = full dome; all four angles = area scan (`start_ha` is wrapped into [0, 2π)); giving only some angles is refused locally. With an agent token the job usually waits in `awaiting_approval` until a person approves it, unless a grant covers it. | `POST /scans` |
+| `scanner_job` | read | `job_id` str | State (`awaiting_approval`, `queued`, `running`, `succeeded`, `failed`, `cancelled`), phase, progress 0–1, result, any problem | `GET /jobs/{id}` |
+| `scanner_wait_for_job` | read | `job_id` str; `timeout_s` int = 900 (clamped 1–7200); `return_on_approval` bool = true | Polls every second. Returns `{job, done, timed_out, waiting_for_approval, elapsed_s}`, plus a `note` when it returns early because the job needs a person's approval (call it again after approval). Sends progress notifications (0–100) when the client asked for them. | `GET /jobs/{id}` |
+| `scanner_cancel_job` | **destructive** | `job_id` str | Cancels a job of yours; a running scan is stopped; the partial sweep is kept as a scan, named by the job's `partial_scan_id` (bridge 0.1.1+) | `POST /jobs/{id}/cancel` |
+| `scanner_preview` | read | `scan_id` str | Two content items: a text line with the image size in pixels, and the preview as a JPEG image the agent can look at (grey laser-intensity panorama for a full dome, close-up for an area scan). Boxes for `scanner_aim` use these pixels, y down; `x1 < x0` wraps across the seam. | `GET /scans/{id}/preview` |
+| `scanner_aim` | read | `reference_scan_id` str; `x0`, `y0`, `x1`, `y1` int; `margin_deg` float = 0.5 (negative counts as 0; sent as `margin_rad`) | An area-scan `window` with four angles to pass to `scanner_start_scan`. The bridge refuses if the scanner moved since the reference scan. | `POST /aim` |
+| `scanner_export` | write (on the bridge) | `scan_id` str; `format` `ply` (default) or `las`; `intensity` `auto` (default), `preview` or `none` | Starts decoding the scan to levelled points; returns a job. When it succeeds, `result.export_id` identifies the export. | `POST /scans/{id}/exports` |
+| `scanner_export_info` | read | `export_id` str | Point count, bounds, `format`, and automatic checks (point count, levelled, coordinates, intensity source), each with `ok` | `GET /exports/{id}` |
+| `scanner_download_export` | local write | `export_id` str; `filename` str = `<export_id>.<format>`; `overwrite` bool = false | Downloads the export into the download directory. Returns `{export_id, bytes, path}`. | `GET /exports/{id}`, then `GET /exports/{id}/file` |
+| `scanner_download_scanfile` | local write | `scan_id` str; `filename` str = `<scan_id>.tzf`; `overwrite` bool = false | Downloads the raw `.tzf`. Returns `{scan_id, bytes, path}`. | `GET /scans/{id}/tzf` |
+| `scanner_recipes` | read | — | Installed recipes: `recipe_id`, `title`, `version`, `summary` | `GET /recipes` |
+| `scanner_recipe` | read | `recipe_id` str | A recipe's inputs and steps (`action`, `person` and `check` steps) | `GET /recipes/{id}` |
+| `scanner_start_run` | write (its steps may queue scans) | `recipe_id` str; `project_id` str; `inputs` object, optional | Starts a run; the bridge executes the steps. It pauses with `waiting_for: approval` (a person must approve a scan) or `waiting_for: input` (a person step; supply its `needs` with `scanner_advance_run`). | `POST /runs` |
+| `scanner_run` | read | `run_id` str | State, what it is waiting for, current step, each step's state, job and output | `GET /runs/{id}` |
+| `scanner_advance_run` | write | `run_id` str; `step_id` str; `input` object | Completes a person step with its `needs`, e.g. `{"box": {"x0": …, "y0": …, "x1": …, "y1": …}}` drawn on the preview of the step named in `preview_of` | `POST /runs/{id}/advance` |
+| `scanner_cancel_run` | **destructive** | `run_id` str | Stops the run; a scan in flight is cancelled too | `POST /runs/{id}/cancel` |
+| `scanner_log` | read | `project_id` str, optional; `since` str (RFC 3339), optional | The field log, oldest first | `GET /log` |
+| `scanner_add_note` | write | `text` str; `project_id` str, optional | Adds an observation to the field log | `POST /log` |
+
+Not present in bridge mode, by design: approving jobs, granting scans, and
+deleting scans or projects. These belong to a person using the bridge app or
+an operator token.
+
+The default download names `<scan_id>.tzf` and `<export_id>.<format>` must
+also pass the plain-name rule; if an id contains other characters, pass
+`filename`.
+
+A typical bridge-mode scan: `scanner_status` → `scanner_projects` /
+`scanner_create_project` → `scanner_start_scan` → `scanner_wait_for_job`
+(ask the person to approve if it returns `waiting_for_approval`, then wait
+again) → `scanner_export` → `scanner_wait_for_job` → `scanner_export_info` →
+`scanner_download_export`.
+
+An area scan: `scanner_preview(<station scan>)` → pick a box →
+`scanner_aim` → `scanner_start_scan` with the four `window` angles.
+
+### Prompt: `run_recipe`
+
+| Argument | Meaning |
+|---|---|
+| `recipe_id` | The recipe to run (from `scanner_recipes`) |
+| `project_id` | The project to run it in |
+
+The prompt fetches the recipe from the bridge (`GET /recipes/{id}`) and
+returns a text plan for the agent:
+
+- the recipe's title, version and summary;
+- the inputs to ask the person for, with their prompts and allowed choices;
+- to call `scanner_start_run` with those inputs and follow it with
+  `scanner_run`;
+- each step, numbered, with how it is handled: `action` steps are run by the
+  bridge itself; `person` steps are completed with `scanner_advance_run`
+  (looking at `scanner_preview` of an earlier step's scan first when the step
+  names one); `check` steps are verified by the bridge;
+- to ask the person to approve in the bridge app whenever the run waits for
+  approval;
+- to report each measured value with its uncertainty, and to say plainly if a
+  check failed or a step was declined.

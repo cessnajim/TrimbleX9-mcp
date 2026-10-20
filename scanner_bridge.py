@@ -234,8 +234,9 @@ async def scanner_wait_for_job(ctx: Context, job_id: str, timeout_s: int = 900,
 
 @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
 async def scanner_cancel_job(job_id: str) -> dict:
-    """Cancel a job of yours. A running scan is stopped and its partial data
-    discarded."""
+    """Cancel a job of yours. A running scan is stopped; the scanner still files
+    the partial sweep, which the cancelled job names as partial_scan_id (bridge
+    0.1.1+). Keep it or delete it."""
     return await _call("POST", f"/jobs/{job_id}/cancel")
 
 
