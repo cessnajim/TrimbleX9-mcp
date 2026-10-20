@@ -33,13 +33,13 @@ Python 3.10 or later. Install from the GitHub release tag; this provides the
 console script `trimblex9-mcp`, which speaks MCP over stdio.
 
 ```bash
-pip install "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.0"
+pip install "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.1"
 # or, isolated:
-pipx install "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.0"
+pipx install "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.1"
 # or run without installing:
-uvx --from "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.0" trimblex9-mcp
+uvx --from "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.1" trimblex9-mcp
 # no git on the host (e.g. a minimal Raspberry Pi image):
-pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.3.0.tar.gz
+pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.3.1.tar.gz
 ```
 
 Dependencies: `mcp` and `httpx` (see [Compatibility](#compatibility)).
@@ -67,7 +67,8 @@ Run the server on the host the scanner is connected to (by USB, or on the
 scanner's Wi-Fi). Out of the box the server is **read-only**: tools that move
 the instrument, fire its laser or delete data are not registered at all
 unless `SCANNER_ALLOW_ACTUATION` is set. With it set, the server validates
-every scan request locally, refuses to start one while the scanner is busy,
+every scan request locally, refuses to start a scan or delete data while the
+scanner is busy,
 and cancels any scan the instrument did not accept exactly as sent.
 
 ### Bridge mode
@@ -140,8 +141,8 @@ data. Each tool carries matching MCP annotations (`readOnlyHint`,
 | `scanner_launch_scan` | **actuating** | Start a full-dome scan |
 | `scanner_launch_area_scan` | **actuating** | Start a scan of an angular window |
 | `scanner_cancel_task` | **destructive** | Stop a running task |
-| `scanner_delete_scan` | **destructive** | Delete a scan and its file, by scanUUID |
-| `scanner_delete_project` | **destructive** | Delete a project and its scans, by projectUUID |
+| `scanner_delete_scan` | **destructive** | Delete a scan and its file, by scanUUID; refused while busy |
+| `scanner_delete_project` | **destructive** | Delete a project and its scans, by projectUUID; refused while busy |
 
 A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 `scanner_create_project`) → `scanner_launch_scan` → `scanner_wait_for_scan` →
@@ -218,8 +219,12 @@ runs a default full-dome scan. It also ignores `projectUUID` unless
    `instrument did not accept the request as sent (sent vs echoed: …);
    cancelled its task (HTTP <status>)`.
 
-The busy check covers only the launch tools; creating projects and deleting
-scans or projects do not check for running tasks.
+`scanner_delete_scan` and `scanner_delete_project` refuse in the same way
+while any task is running or queued: a scan being filed renumbers the scan and
+project lists that the delete verification relies on, and deleting the project
+a scan is writing into is never wanted. `scanner_create_project` does not
+check, since a new project does not touch the running task. `scanner_cancel_task`
+is meant for a running task, so it does not check either.
 
 ### Delete by UUID, verified (direct mode)
 
@@ -260,7 +265,12 @@ contains.
 The bridge enforces approvals, battery limits, a busy scanner, a scanner that
 moved since the reference scan, and request echo checks, for every client.
 This server adds only input shape checks (for example, all four window angles
-or none) and the download-directory rules above.
+or none) and the download-directory rules above. Ids (`scan_id`, `job_id`,
+`export_id`, `run_id`, `recipe_id`) are sent as single URL path segments with
+every reserved character escaped, and an empty id, `.` or `..` is refused, so
+an id cannot reach a different bridge endpoint. Whether projects can be
+created while the scanner is busy is the bridge's decision; bridge mode has no
+delete tools.
 
 ## Errors
 
@@ -273,7 +283,10 @@ other exceptions). The messages are:
 | Scanner answered with an HTTP error (direct) | `HTTP <status> from <url>: <first 200 chars of body>` |
 | Scanner unreachable (direct) | `instrument unreachable (<ErrorType>: <detail>)` |
 | Bridge refused (bridge) | `<code>: <title> — <detail> (hint: <hint>)`, from the bridge's problem response, e.g. `battery_low`, `instrument_moved`, `invalid_request` |
-| Bridge answered an error without a JSON body | `HTTP <status>: <first 200 chars of body>` |
+| Bridge answered an error without a problem body (not JSON, or JSON without `code`/`title`) | `HTTP <status>: <first 200 chars of body>` |
+| Scanner or bridge answered success with a body that is not JSON | `instrument sent a response that is not JSON (<detail>)` / `bridge sent a response that is not JSON (<detail>)` |
+| Truncated or malformed `.tzf` or JPEG in `scanner_preview_to_angles` (direct) | `<name> is truncated or not a scan file` / `<name> is a truncated or malformed JPEG` |
+| Any other bad value in a reply or file | `truncated or malformed data (<detail>)` or `invalid value (<ErrorType>: <detail>)` |
 | Bridge unreachable (bridge) | `bridge unreachable (<ErrorType>: <detail>)` |
 | Validation, busy, echo, delete and file-name checks | A plain sentence saying what was wrong and what to do, e.g. `unknown scan_mode 'X'; valid: …`, `<path> already exists; pass overwrite=true to replace it` |
 
@@ -300,7 +313,7 @@ claude mcp add trimblex9 \
 Without installing first:
 
 ```bash
-claude mcp add trimblex9 -- uvx --from "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.0" trimblex9-mcp
+claude mcp add trimblex9 -- uvx --from "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.1" trimblex9-mcp
 ```
 
 Bridge mode:
@@ -344,7 +357,7 @@ start it over SSH; MCP's stdio transport passes through `ssh` unchanged.
 
 ```bash
 # on the Pi
-pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.3.0.tar.gz
+pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.3.1.tar.gz
 
 # on the agent's machine
 claude mcp add trimblex9 -- ssh -T pi@scanner-pi.local \
@@ -387,8 +400,10 @@ Notes:
 | OS | Linux and macOS (anything that can reach the scanner's network link) |
 | Transport | stdio |
 
-CI runs the tests on Python 3.10 with the newest mcp 1.x and on Python 3.13
-with mcp 2.x. The tools use tool annotations, which `FastMCP` accepts from
+CI runs the tests on Python 3.10 with mcp 1.7 (the floor; pinned with
+`pydantic<2.14`, because mcp 1.7 imports a pydantic internal that 2.14
+removed), on Python 3.10 with the newest mcp 1.x, and on Python 3.13 with
+mcp 2.x. If you must stay on mcp 1.7, keep pydantic below 2.14. The tools use tool annotations, which `FastMCP` accepts from
 mcp 1.7, so the requirement is `mcp>=1.7,<3`.
 
 ## Tests
@@ -401,8 +416,8 @@ python3 -m venv .venv
 
 | Test file | Needs | Covers |
 |---|---|---|
-| `tests/test_offline.py` | nothing (starts an in-process stub of the scanner API) | Direct mode with actuation on: delete by UUID across renumbering, local launch validation, area-scan echo check, cancel on a mismatched echo, `scanner_preview_to_angles` including the seam wrap, refusal while busy, Wi-Fi key masking, readable error when unreachable |
-| `tests/test_bridge_mode.py` | `X9_BRIDGE_BIN` | Bridge mode against a real bridge and scanner simulator: tool list has no approve/grant/delete tools, approval flow and progress, bridge error codes, recipe prompt and run, field log |
+| `tests/test_offline.py` | nothing (starts in-process stubs of the scanner and bridge APIs) | Direct mode with actuation on: delete by UUID across renumbering, local launch validation, area-scan echo check, cancel on a mismatched echo, `scanner_preview_to_angles` including the seam wrap, launch and delete refused while busy, readable errors for truncated `.tzf`/JPEG files, non-JSON replies and an unreachable scanner, plain default download names, Wi-Fi key masking. Bridge helpers: ids escaped in URL paths, sanitised default download names, readable errors for non-JSON and non-problem replies |
+| `tests/test_bridge_mode.py` | `X9_BRIDGE_BIN` | Bridge mode against a real bridge and scanner simulator: tool list has no approve/grant/delete tools, approval flow and progress, bridge error codes, an escaped id that would otherwise reach another endpoint, recipe prompt and run, field log |
 
 Bridge-mode tests are skipped unless these are set:
 

@@ -25,6 +25,7 @@ with any instrument manufacturer.
 import asyncio
 import functools
 import inspect
+import json
 import math
 import os
 import re
@@ -42,7 +43,7 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import Context, FastMCP
     from mcp.server.fastmcp.exceptions import ToolError
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 BASE = os.environ.get("SCANNER_BASE", "http://192.168.42.1:34567/api/v1").rstrip("/")
 ALLOW_ACTUATION = os.environ.get("SCANNER_ALLOW_ACTUATION", "").lower() in ("1", "true", "yes")
@@ -54,34 +55,49 @@ TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 mcp = FastMCP("trimblex9")
 
 
-def _http_error_text(e: httpx.HTTPError) -> str:
+def _error_text(e: Exception, peer: str) -> str:
     if isinstance(e, httpx.HTTPStatusError):
         return f"HTTP {e.response.status_code} from {e.request.url}: {e.response.text[:200]}"
-    return f"instrument unreachable ({type(e).__name__}: {e})"
+    if isinstance(e, httpx.HTTPError):
+        return f"{peer} unreachable ({type(e).__name__}: {e})"
+    if isinstance(e, json.JSONDecodeError):
+        return f"{peer} sent a response that is not JSON ({e})"
+    if isinstance(e, struct.error):
+        return f"truncated or malformed data ({e})"
+    return f"invalid value ({type(e).__name__}: {e})"
 
 
-def _tool_errors(fn):
-    """Report HTTP and connection failures as tool errors, whose text reaches
-    the client (mcp 2.x hides the text of other exceptions)."""
-    if inspect.iscoroutinefunction(fn):
-        @functools.wraps(fn)
-        async def wrapper(*a, **k):
-            try:
-                return await fn(*a, **k)
-            except httpx.HTTPError as e:
-                raise ToolError(_http_error_text(e)) from e
-    else:
-        @functools.wraps(fn)
-        def wrapper(*a, **k):
-            try:
-                return fn(*a, **k)
-            except httpx.HTTPError as e:
-                raise ToolError(_http_error_text(e)) from e
-    return wrapper
+_CONVERTED = (httpx.HTTPError, ValueError, struct.error)  # ValueError covers JSON errors
+
+
+def error_wrapper(peer: str):
+    """Report HTTP, connection, JSON and data errors as tool errors, whose text
+    reaches the client (mcp 2.x hides the text of other exceptions). `peer`
+    names the other end in messages ("instrument", "bridge")."""
+    def deco(fn):
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def wrapper(*a, **k):
+                try:
+                    return await fn(*a, **k)
+                except _CONVERTED as e:
+                    raise ToolError(_error_text(e, peer)) from e
+        else:
+            @functools.wraps(fn)
+            def wrapper(*a, **k):
+                try:
+                    return fn(*a, **k)
+                except _CONVERTED as e:
+                    raise ToolError(_error_text(e, peer)) from e
+        return wrapper
+    return deco
+
+
+_tool_errors = error_wrapper("instrument")
 
 
 def tool(**kw):
-    """mcp.tool, with HTTP failures reported as tool errors."""
+    """mcp.tool, with HTTP and data failures reported as tool errors."""
     return lambda fn: mcp.tool(**kw)(_tool_errors(fn))
 
 
@@ -99,6 +115,14 @@ async def _get_json(path: str):
 # ------------------------------------------------------- download safety -----
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _default_name(stem, ext) -> str:
+    """A plain download name built from an id that may hold other characters:
+    runs of anything but letters, digits, '_' and '-' become '_'."""
+    ext = re.sub(r"[^A-Za-z0-9]", "", str(ext))[:8] or "bin"
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", str(stem)).lstrip("_-")[:127 - len(ext)]
+    return f"{stem or 'download'}.{ext}"
 
 
 def _dest(filename: str | None, default: str, overwrite: bool) -> str:
@@ -159,6 +183,13 @@ def _existing_file(filename: str) -> str:
 # u32 grid rows/cols (+0x30/+0x34).
 
 def _scan_geometry(path: str) -> dict:
+    try:
+        return _read_scan_geometry(path)
+    except struct.error:
+        raise ToolError(f"{os.path.basename(path)} is truncated or not a scan file") from None
+
+
+def _read_scan_geometry(path: str) -> dict:
     with open(path, "rb") as fh:
         size = os.fstat(fh.fileno()).st_size
         fh.seek(0x10)
@@ -176,6 +207,13 @@ def _scan_geometry(path: str) -> dict:
 
 def _jpeg_size(path: str) -> tuple[int, int]:
     """(width, height) from a JPEG's SOF marker."""
+    try:
+        return _read_jpeg_size(path)
+    except struct.error:
+        raise ToolError(f"{os.path.basename(path)} is a truncated or malformed JPEG") from None
+
+
+def _read_jpeg_size(path: str) -> tuple[int, int]:
     with open(path, "rb") as fh:
         if fh.read(2) != b"\xff\xd8":
             raise ToolError(f"{os.path.basename(path)} is not a JPEG")
@@ -208,8 +246,9 @@ async def _check_project(project_name: str, project_uuid: str) -> None:
 
 
 async def _check_idle() -> None:
-    """Refuse to launch while any task is running or queued: another client
-    (or another agent) may be driving the instrument."""
+    """Refuse to launch or delete while any task is running or queued: another
+    client (or another agent) may be driving the instrument, and a scan being
+    filed renumbers the lists a delete relies on."""
     tasks = await _get_json("tasks")
     if tasks:
         busy = ", ".join(f"{t.get('type')} {t.get('taskUUID')} ({t.get('state')})" for t in tasks)
@@ -522,13 +561,17 @@ if ALLOW_ACTUATION:
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
     async def scanner_delete_scan(scan_uuid: str) -> dict:
         """DESTRUCTIVE: permanently delete a scan (and its file), identified by its
-        scanUUID from scanner_scans. Deletion is confirmed afterwards."""
+        scanUUID from scanner_scans. Refuses while any task is running.
+        Deletion is confirmed afterwards."""
+        await _check_idle()
         return await _delete_verified("scans", "scanUUID", scan_uuid)
 
     @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
     async def scanner_delete_project(project_uuid: str) -> dict:
         """DESTRUCTIVE: permanently delete a project and its scans, identified by
-        its projectUUID from scanner_projects. Deletion is confirmed afterwards."""
+        its projectUUID from scanner_projects. Refuses while any task is
+        running. Deletion is confirmed afterwards."""
+        await _check_idle()
         return await _delete_verified("projects", "projectUUID", project_uuid)
 
 

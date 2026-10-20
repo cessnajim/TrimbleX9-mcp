@@ -12,11 +12,10 @@ Config:
   SCANNER_DOWNLOAD_DIR  Where downloads are written (default ~/scanner-downloads)
 """
 import asyncio
-import functools
-import inspect
 import math
 import os
 import time
+from urllib.parse import quote
 
 import httpx
 
@@ -28,7 +27,7 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import Context, FastMCP, Image
     from mcp.server.fastmcp.exceptions import ToolError
 
-import scanner_mcp as direct  # download-path safety helpers
+import scanner_mcp as direct  # download-path safety and error helpers
 
 URL = os.environ.get("SCANNER_BRIDGE_URL", "").rstrip("/")
 TOKEN = os.environ.get("SCANNER_BRIDGE_TOKEN", "")
@@ -37,34 +36,11 @@ TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 mcp = FastMCP("trimblex9-bridge")
 
 
-def _http_error_text(e: httpx.HTTPError) -> str:
-    if isinstance(e, httpx.HTTPStatusError):
-        return f"HTTP {e.response.status_code} from {e.request.url}: {e.response.text[:200]}"
-    return f"bridge unreachable ({type(e).__name__}: {e})"
-
-
-def _tool_errors(fn):
-    """Report HTTP and connection failures as tool errors, whose text reaches
-    the client (mcp 2.x hides the text of other exceptions)."""
-    if inspect.iscoroutinefunction(fn):
-        @functools.wraps(fn)
-        async def wrapper(*a, **k):
-            try:
-                return await fn(*a, **k)
-            except httpx.HTTPError as e:
-                raise ToolError(_http_error_text(e)) from e
-    else:
-        @functools.wraps(fn)
-        def wrapper(*a, **k):
-            try:
-                return fn(*a, **k)
-            except httpx.HTTPError as e:
-                raise ToolError(_http_error_text(e)) from e
-    return wrapper
+_tool_errors = direct.error_wrapper("bridge")
 
 
 def tool(**kw):
-    """mcp.tool, with HTTP failures reported as tool errors."""
+    """mcp.tool, with HTTP and data failures reported as tool errors."""
     return lambda fn: mcp.tool(**kw)(_tool_errors(fn))
 
 
@@ -76,17 +52,28 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {TOKEN}"}
 
 
+def _seg(value) -> str:
+    """An id as one URL path segment ('/', '?', '#' and the like escaped)."""
+    s = str(value)
+    if s in ("", ".", ".."):
+        raise ToolError(f"invalid id {s!r}")
+    return quote(s, safe="")
+
+
 def _raise(r: httpx.Response) -> None:
     if r.status_code < 400:
         return
     try:
         p = r.json()
+    except ValueError:
+        p = None
+    if isinstance(p, dict) and (p.get("code") or p.get("title")):
         msg = f"{p.get('code', r.status_code)}: {p.get('title', '')}"
         if p.get("detail"):
             msg += f" — {p['detail']}"
         if p.get("hint"):
             msg += f" (hint: {p['hint']})"
-    except ValueError:
+    else:
         msg = f"HTTP {r.status_code}: {r.text[:200]}"
     raise BridgeError(msg)
 
@@ -164,7 +151,7 @@ async def scanner_scans(project_id: str | None = None) -> list:
 @tool(annotations=READ)
 async def scanner_scan(scan_id: str) -> dict:
     """One scan's record."""
-    return await _call("GET", f"/scans/{scan_id}")
+    return await _call("GET", f"/scans/{_seg(scan_id)}")
 
 
 @tool(annotations=WRITE)
@@ -200,7 +187,7 @@ async def scanner_start_scan(
 async def scanner_job(job_id: str) -> dict:
     """One job: state (awaiting_approval, queued, running, succeeded, failed,
     cancelled), phase, progress 0-1, result and any problem."""
-    return await _call("GET", f"/jobs/{job_id}")
+    return await _call("GET", f"/jobs/{_seg(job_id)}")
 
 
 @tool(annotations=READ)
@@ -213,7 +200,7 @@ async def scanner_wait_for_job(ctx: Context, job_id: str, timeout_s: int = 900,
     timeout_s = max(1, min(int(timeout_s), 7200))
     start = time.monotonic()
     while True:
-        job = await _call("GET", f"/jobs/{job_id}")
+        job = await _call("GET", f"/jobs/{_seg(job_id)}")
         elapsed = round(time.monotonic() - start, 1)
         state = job.get("state")
         if state in ("succeeded", "failed", "cancelled"):
@@ -237,7 +224,7 @@ async def scanner_cancel_job(job_id: str) -> dict:
     """Cancel a job of yours. A running scan is stopped; the scanner still files
     the partial sweep, which the cancelled job names as partial_scan_id (bridge
     0.1.1+). Keep it or delete it."""
-    return await _call("POST", f"/jobs/{job_id}/cancel")
+    return await _call("POST", f"/jobs/{_seg(job_id)}/cancel")
 
 
 # ------------------------------------------------------------------ aiming ---
@@ -249,7 +236,7 @@ async def scanner_preview(scan_id: str) -> list:
     or close-up (area scan). Returns the image and its size in pixels; boxes
     for scanner_aim are given in these pixel coordinates (y down)."""
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as c:
-        r = await c.get(f"{URL}/scans/{scan_id}/preview", headers=_headers())
+        r = await c.get(f"{URL}/scans/{_seg(scan_id)}/preview", headers=_headers())
     _raise(r)
     w, h = _jpeg_dims(r.content)
     return [f"Preview of scan {scan_id}: {w} x {h} px. Give scanner_aim boxes in these pixels (y down; "
@@ -287,30 +274,30 @@ async def scanner_export(scan_id: str, format: str = "ply", intensity: str = "au
     """Decode a scan to levelled points (format `ply` or `las`; intensity
     `auto`, `preview` or `none`). Returns a job; when it succeeds its result
     has an export_id for scanner_export_info and scanner_download_export."""
-    return await _call("POST", f"/scans/{scan_id}/exports", {"format": format, "intensity": intensity})
+    return await _call("POST", f"/scans/{_seg(scan_id)}/exports", {"format": format, "intensity": intensity})
 
 
 @tool(annotations=READ)
 async def scanner_export_info(export_id: str) -> dict:
     """An export's point count, bounds and automatic checks (point count,
     levelled, coordinates, intensity source). Mention any failed check."""
-    return await _call("GET", f"/exports/{export_id}")
+    return await _call("GET", f"/exports/{_seg(export_id)}")
 
 
 @tool(annotations=WRITE)
 async def scanner_download_export(export_id: str, filename: str | None = None, overwrite: bool = False) -> dict:
     """Download an export into SCANNER_DOWNLOAD_DIR (plain file name; no paths)."""
-    info = await _call("GET", f"/exports/{export_id}")
-    dest = direct._dest(filename, f"{export_id}.{info.get('format', 'ply')}", overwrite)
-    n = await _download(f"/exports/{export_id}/file", dest)
+    info = await _call("GET", f"/exports/{_seg(export_id)}")
+    dest = direct._dest(filename, direct._default_name(export_id, info.get("format") or "ply"), overwrite)
+    n = await _download(f"/exports/{_seg(export_id)}/file", dest)
     return {"export_id": export_id, "bytes": n, "path": dest}
 
 
 @tool(annotations=WRITE)
 async def scanner_download_scanfile(scan_id: str, filename: str | None = None, overwrite: bool = False) -> dict:
     """Download a scan's raw file (.tzf) into SCANNER_DOWNLOAD_DIR."""
-    dest = direct._dest(filename, f"{scan_id}.tzf", overwrite)
-    n = await _download(f"/scans/{scan_id}/tzf", dest)
+    dest = direct._dest(filename, direct._default_name(scan_id, "tzf"), overwrite)
+    n = await _download(f"/scans/{_seg(scan_id)}/tzf", dest)
     return {"scan_id": scan_id, "bytes": n, "path": dest}
 
 
@@ -326,7 +313,7 @@ async def scanner_recipes() -> list:
 @tool(annotations=READ)
 async def scanner_recipe(recipe_id: str) -> dict:
     """A recipe's inputs and steps (action, person and check steps)."""
-    return await _call("GET", f"/recipes/{recipe_id}")
+    return await _call("GET", f"/recipes/{_seg(recipe_id)}")
 
 
 @tool(annotations=WRITE)
@@ -342,20 +329,20 @@ async def scanner_start_run(recipe_id: str, project_id: str, inputs: dict | None
 async def scanner_run(run_id: str) -> dict:
     """A run: state, what it is waiting for, the current step, and each step's
     state, job and output."""
-    return await _call("GET", f"/runs/{run_id}")
+    return await _call("GET", f"/runs/{_seg(run_id)}")
 
 
 @tool(annotations=WRITE)
 async def scanner_advance_run(run_id: str, step_id: str, input: dict) -> dict:
     """Complete a person step with its `needs` (e.g. {"box": {"x0":…, "y0":…,
     "x1":…, "y1":…}} drawn on the `preview_of` step's preview)."""
-    return await _call("POST", f"/runs/{run_id}/advance", {"step_id": step_id, "input": input})
+    return await _call("POST", f"/runs/{_seg(run_id)}/advance", {"step_id": step_id, "input": input})
 
 
 @tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True})
 async def scanner_cancel_run(run_id: str) -> dict:
     """Stop a run; a scan in flight is cancelled too."""
-    return await _call("POST", f"/runs/{run_id}/cancel")
+    return await _call("POST", f"/runs/{_seg(run_id)}/cancel")
 
 
 # --------------------------------------------------------------------- log ---
@@ -383,7 +370,7 @@ async def scanner_add_note(text: str, project_id: str | None = None) -> dict:
 @mcp.prompt()
 async def run_recipe(recipe_id: str, project_id: str) -> str:
     """Walk a scanning recipe with the person, using the bridge tools."""
-    r = await _call("GET", f"/recipes/{recipe_id}")
+    r = await _call("GET", f"/recipes/{_seg(recipe_id)}")
     lines = [f"Run the recipe \"{r['title']}\" (v{r['version']}) in project {project_id}.", r.get("summary", ""), ""]
     if r.get("inputs"):
         lines.append("First ask the person for these inputs:")

@@ -121,6 +121,8 @@ def test_errors_carry_the_bridge_code(tools):
         run(fn(tools.scanner_start_scan)(tools._state["project_id"], "STD_L9"))
     with pytest.raises(tools.ToolError):
         run(fn(tools.scanner_start_scan)(tools._state["project_id"], "STD_L2", start_ha=1.0))
+    with pytest.raises(tools.BridgeError, match="not_found"):  # one escaped path segment
+        run(fn(tools.scanner_scan)("../status"))
 
 
 @pytest.mark.skipif(not FIX, reason="needs X9_FIXTURES")

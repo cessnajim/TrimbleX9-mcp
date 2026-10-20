@@ -9,6 +9,8 @@ import sys
 import tempfile
 import threading
 
+import pytest
+
 P_UUID = "1a89f533-ea7f-429c-9ba5-54a1e11c6159"
 MODES = [{"scanMode": "HS_L1"}, {"scanMode": "STD_L0"}]
 DEFAULTS = {"scanMode": "STD_L0", "scanType": "FullDome", "colorMode": "ON", "fastMode": False,
@@ -41,6 +43,12 @@ class Stub(http.server.BaseHTTPRequestHandler):
             return self._send([dict(s, id=i) for i, s in enumerate(STATE["scans"])])
         if p == "tasks":
             return self._send(STATE["tasks"])
+        if p == "errors":  # a broken reply: HTTP 200 with a body that is not JSON
+            body = b"<html>gateway</html>"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if p == "status":
             return self._send({"batteryLevel": 80, "wifiConfiguration": {
                 "SSID": "SCANNER-1", "key": "hunter2-plaintext", "isFactoryKey": True, "wifiBand": "both"},
@@ -175,6 +183,40 @@ def test_launch_refused_while_busy():
     assert STATE["cancelled"] == []
 
 
+def test_delete_refused_while_busy():
+    reset()
+    STATE["tasks"] = [{"id": 3, "taskUUID": "other-client", "type": "scan", "state": "running"}]
+    assert "busy" in raises("scanner_delete_scan", scan_uuid="s-1")
+    assert "busy" in raises("scanner_delete_project", project_uuid=P_UUID)
+    assert len(STATE["scans"]) == 4  # nothing was deleted
+
+
+def test_truncated_files_are_readable_errors():
+    with open(os.path.join(DL, "short.tzf"), "wb") as fh:
+        fh.write(b"\0" * 0x12)  # cut off inside the metadata pointer
+    with open(os.path.join(DL, "short.jpg"), "wb") as fh:
+        fh.write(b"\xff\xd8\xff\xe0\x00")  # cut off inside a segment length
+    _fake_scan("ok.tzf", 10, 20, 1e-3, 0.0, 0.0)
+    _fake_jpeg("ok.jpg", 20, 10)
+    box = dict(x0=0, y0=0, x1=1, y1=1)
+    assert "short.tzf is truncated" in raises("scanner_preview_to_angles", scan_filename="short.tzf",
+                                              preview_filename="ok.jpg", **box)
+    assert "short.jpg is a truncated" in raises("scanner_preview_to_angles", scan_filename="ok.tzf",
+                                                preview_filename="short.jpg", **box)
+
+
+def test_non_json_reply_is_a_readable_error():
+    assert "not JSON" in raises("scanner_errors")
+
+
+def test_default_names_are_plain():
+    assert m._default_name("3f2a-77", "tzf") == "3f2a-77.tzf"
+    assert m._default_name("../a/b?c d", "tzf") == "a_b_c_d.tzf"
+    assert m._default_name("...", "la/s") == "download.las"
+    long = m._default_name("x" * 300, "ply")
+    assert len(long) == 128 and m._SAFE_NAME.fullmatch(long)
+
+
 def test_status_masks_wifi_key():
     s = call("scanner_status")
     w = s["wifiConfiguration"]
@@ -185,3 +227,74 @@ def test_status_masks_wifi_key():
 def test_unreachable_instrument_is_a_readable_error(monkeypatch):
     monkeypatch.setattr(m, "BASE", "http://127.0.0.1:9/api/v1")
     assert "instrument unreachable" in raises("scanner_status")
+
+
+# ------------------------------------------- bridge-mode helpers, offline -----
+
+class BridgeStub(http.server.BaseHTTPRequestHandler):
+    paths = []
+
+    def _reply(self, code, body, ctype="application/json"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        BridgeStub.paths.append(self.path)
+        if self.path == "/v1/status":
+            return self._reply(200, b"not json", "text/plain")
+        if self.path.startswith("/v1/jobs/"):
+            return self._reply(500, b'["boom"]')
+        if self.path.startswith("/v1/exports/") and not self.path.endswith("/file"):
+            return self._reply(200, b'{"format": "las"}')
+        if self.path.startswith("/v1/scans/") and not self.path.endswith("/tzf"):
+            return self._reply(200, b'{"scan_id": "x"}')
+        self._reply(200, b"DATA", "application/octet-stream")
+
+    def log_message(self, *a):
+        pass
+
+
+bsrv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), BridgeStub)
+threading.Thread(target=bsrv.serve_forever, daemon=True).start()
+import scanner_bridge as b  # noqa: E402
+
+
+def bcall(name, *args):
+    return asyncio.run(getattr(getattr(b, name), "fn", getattr(b, name))(*args))
+
+
+def bridge(monkeypatch):
+    monkeypatch.setattr(b, "URL", f"http://127.0.0.1:{bsrv.server_address[1]}/v1")
+    monkeypatch.setattr(b, "TOKEN", "t")
+    BridgeStub.paths.clear()
+
+
+def test_bridge_ids_are_escaped(monkeypatch):
+    bridge(monkeypatch)
+    bcall("scanner_scan", "../status?x#y")
+    bcall("scanner_scan", "a/b")
+    assert BridgeStub.paths == ["/v1/scans/..%2Fstatus%3Fx%23y", "/v1/scans/a%2Fb"]
+    for bad in ("", ".", ".."):
+        with pytest.raises(b.ToolError, match="invalid id"):
+            bcall("scanner_scan", bad)
+
+
+def test_bridge_default_download_names_are_sanitised(monkeypatch):
+    bridge(monkeypatch)
+    monkeypatch.setattr(b.direct, "DOWNLOAD_DIR", DL)
+    d = bcall("scanner_download_export", "exp/1:2")
+    assert os.path.basename(d["path"]) == "exp_1_2.las" and d["bytes"] == 4
+    assert BridgeStub.paths[-1] == "/v1/exports/exp%2F1%3A2/file"
+    d = bcall("scanner_download_scanfile", "../scan 9")
+    assert os.path.basename(d["path"]) == "scan_9.tzf"
+
+
+def test_bridge_odd_replies_are_readable_errors(monkeypatch):
+    bridge(monkeypatch)
+    with pytest.raises(b.ToolError, match="bridge sent a response that is not JSON"):
+        bcall("scanner_status")
+    with pytest.raises(b.BridgeError, match=r'HTTP 500: \["boom"\]'):
+        bcall("scanner_job", "j1")

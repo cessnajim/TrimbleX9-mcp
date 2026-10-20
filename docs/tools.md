@@ -71,6 +71,8 @@ directory. Existing files are kept unless `overwrite` is true. Data streams to
 - `margin_deg` (negative values count as 0) pads every side.
 - `start_ha` wraps into [0, 2π); `delta_ha` is capped at 2π; VA is clamped to
   [0, π].
+- A truncated or malformed file fails with `<name> is truncated or not a scan
+  file` or `<name> is a truncated or malformed JPEG`.
 
 ### Only with `SCANNER_ALLOW_ACTUATION`
 
@@ -79,12 +81,12 @@ These are not registered unless `SCANNER_ALLOW_ACTUATION` is `1`, `true` or
 
 | Tool | Kind | Parameters | Returns / behaviour |
 |---|---|---|---|
-| `scanner_create_project` | write | `project_name` str; `project_uuid` str (supply a fresh UUIDv4) | `POST projects` with `{projectName, projectUUID}`; returns the created record. The UUID format and name uniqueness are not checked by this server. |
+| `scanner_create_project` | write | `project_name` str; `project_uuid` str (supply a fresh UUIDv4) | `POST projects` with `{projectName, projectUUID}`; returns the created record. The UUID format and name uniqueness are not checked by this server. Allowed while a task is running (a new project does not touch it). |
 | `scanner_launch_scan` | **actuating** | `project_name` str; `project_uuid` str; `scan_mode` str (from `scanner_scan_modes`); `color` bool = false (also capture images; slower) | Full-dome scan. Runs the launch checks, then `POST scans` with `scanType: FullDome`, `fastMode: false`, `colorMode: ON/OFF`. Returns the task summary (as in `scanner_tasks`). Follow with `scanner_wait_for_scan`. |
 | `scanner_launch_area_scan` | **actuating** | as `scanner_launch_scan`, plus `start_ha`, `delta_ha`, `start_va`, `delta_va` float (radians; get them from `scanner_preview_to_angles`) | Scan of an angular window: `scanType: AreaScan` with `startHA`, `deltaHA`, `startVA`, `deltaVA`. Same checks. A small window without color takes about a minute, mostly levelling. Area scans are saved as `<station>_<n>.tzf` next to the station's full-dome scan. |
 | `scanner_cancel_task` | **destructive** | `task_uuid` str (from `scanner_tasks`) | Looks up the task's current `id` and sends `DELETE tasks/{id}`. Returns `{cancelled, status}`; fails if no such task is running or the scanner answers 400 or above. See the note below on partial scans. |
-| `scanner_delete_scan` | **destructive** | `scan_uuid` str (from `scanner_scans`) | Permanently deletes the scan and its file, by UUID, verified. Returns `{deleted: "scan", scanUUID, id_at_delete}`. |
-| `scanner_delete_project` | **destructive** | `project_uuid` str (from `scanner_projects`) | Permanently deletes the project and its scans, by UUID, verified. Returns `{deleted: "project", projectUUID, id_at_delete}`. |
+| `scanner_delete_scan` | **destructive** | `scan_uuid` str (from `scanner_scans`) | Refused while any task is running or queued. Permanently deletes the scan and its file, by UUID, verified. Returns `{deleted: "scan", scanUUID, id_at_delete}`. |
+| `scanner_delete_project` | **destructive** | `project_uuid` str (from `scanner_projects`) | Refused while any task is running or queued. Permanently deletes the project and its scans, by UUID, verified. Returns `{deleted: "project", projectUUID, id_at_delete}`. |
 
 **Launch checks**, in order (both launch tools): angle ranges (area scan:
 `delta_ha` in (0, 2π], `0 ≤ start_va`, `0 < delta_va`,
@@ -94,9 +96,12 @@ that name **and** UUID exists; `scan_mode` is a known mode. Nothing is sent
 until all pass. After sending, every field must be echoed back unchanged in
 the task's `scanRequest`, or the task is cancelled at once and the tool fails.
 
-**Delete verification**: the tool lists scans or projects, finds exactly one
-record with the UUID, deletes it by its current `id`, lists again, and
-succeeds only if the UUID is gone and the list is one shorter.
+**Delete checks**: both delete tools first refuse, like the launch tools, if
+any task is running or queued (`instrument is busy: …`); a scan being filed
+renumbers the lists the verification relies on. Then the tool lists scans or
+projects, finds exactly one record with the UUID, deletes it by its current
+`id`, lists again, and succeeds only if the UUID is gone and the list is one
+shorter.
 
 **Cancelling a scan**: the scan stops, but the instrument still files the
 partial sweep as a scan with a valid `.tzf` (confirmed on a real X9, see
@@ -122,7 +127,9 @@ If the instrument is moved, take a new full-dome scan before aiming again.
 Every tool is one call to the bridge's API at `SCANNER_BRIDGE_URL` with
 `Authorization: Bearer <SCANNER_BRIDGE_TOKEN>`. The bridge applies its rules
 and returns problem responses that this server turns into
-`<code>: <title> — <detail> (hint: <hint>)` errors. Fields named below are the
+`<code>: <title> — <detail> (hint: <hint>)` errors; an error reply without a
+problem body becomes `HTTP <status>: <body>`, and a success reply that is not
+JSON becomes `bridge sent a response that is not JSON (…)`. Fields named below are the
 ones the bridge returns; see the bridge's own documentation for full schemas.
 
 | Tool | Kind | Parameters | Returns / behaviour | Bridge call |
@@ -156,9 +163,14 @@ Not present in bridge mode, by design: approving jobs, granting scans, and
 deleting scans or projects. These belong to a person using the bridge app or
 an operator token.
 
-The default download names `<scan_id>.tzf` and `<export_id>.<format>` must
-also pass the plain-name rule; if an id contains other characters, pass
-`filename`.
+Ids are sent as one URL path segment each, with `/`, `?`, `#`, `%` and other
+reserved characters escaped; an empty id, `.` or `..` is refused locally.
+
+The default download names are `<scan_id>.tzf` and `<export_id>.<format>`,
+made plain: each run of characters other than letters, digits, `_` and `-` in
+the id becomes `_`, leading `_`/`-` are dropped, and the name is cut to 128
+characters (`download.<ext>` if nothing is left). Pass `filename` to choose
+the name yourself.
 
 A typical bridge-mode scan: `scanner_status` → `scanner_projects` /
 `scanner_create_project` → `scanner_start_scan` → `scanner_wait_for_job`
