@@ -34,6 +34,6 @@ clean-room process.
 | `POST /scans` answers 202 with a task echoing the request; for a request it can't parse it still answers 202 and runs a default full dome | Observed; hence the echo check that cancels a mismatch |
 | `scanType` `FullDome` (the default in the echo) and `AreaScan` with radian windows, vertical angle from the zenith | Area scans covered exactly the requested windows |
 | Scan ids are list positions that shift after a delete; `scanUUID` is stable | Observed after `DELETE /scans/{id}`; deletes resolve the id right before deleting |
-| `DELETE /tasks/{id}` stops a running task | Used by `scanner_cancel_task`; confirm on your scanner before relying on it |
+| `DELETE /tasks/{id}` stops a running task | Cancelled an HS_L1 full dome 5 s into the sweep (2026-10-20, over Wi-Fi): the sweep stopped at ~5 %, `/tasks` emptied 13 s later (`exitResult` stayed `none`), and the scanner still filed a scan record with the partial sweep (69,552 points, a valid `.tzf`) |
 
 This describes the method; it is not legal advice.
