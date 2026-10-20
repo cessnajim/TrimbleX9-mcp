@@ -27,7 +27,7 @@ classifiers = [
 trimblex9-mcp = "scanner_mcp:main"
 
 [project.urls]
-Repository = "https://github.com/cessnajim/TrimbleX9-mcp"
+Repository = "https://github.com/northidaholabs/TrimbleX9-mcp"
 
 [tool.setuptools]
 py-modules = ["scanner_mcp", "scanner_bridge"]

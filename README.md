@@ -33,13 +33,13 @@ Python 3.10 or later. Install from the GitHub release tag; this provides the
 console script `trimblex9-mcp`, which speaks MCP over stdio.
 
 ```bash
-pip install "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.1"
+pip install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.3.1"
 # or, isolated:
-pipx install "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.1"
+pipx install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.3.1"
 # or run without installing:
-uvx --from "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.1" trimblex9-mcp
+uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.3.1" trimblex9-mcp
 # no git on the host (e.g. a minimal Raspberry Pi image):
-pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.3.1.tar.gz
+pip install https://github.com/northidaholabs/TrimbleX9-mcp/archive/refs/tags/v0.3.1.tar.gz
 ```
 
 Dependencies: `mcp` and `httpx` (see [Compatibility](#compatibility)).
@@ -313,7 +313,7 @@ claude mcp add trimblex9 \
 Without installing first:
 
 ```bash
-claude mcp add trimblex9 -- uvx --from "git+https://github.com/cessnajim/TrimbleX9-mcp@v0.3.1" trimblex9-mcp
+claude mcp add trimblex9 -- uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.3.1" trimblex9-mcp
 ```
 
 Bridge mode:
@@ -357,7 +357,7 @@ start it over SSH; MCP's stdio transport passes through `ssh` unchanged.
 
 ```bash
 # on the Pi
-pip install https://github.com/cessnajim/TrimbleX9-mcp/archive/refs/tags/v0.3.1.tar.gz
+pip install https://github.com/northidaholabs/TrimbleX9-mcp/archive/refs/tags/v0.3.1.tar.gz
 
 # on the agent's machine
 claude mcp add trimblex9 -- ssh -T pi@scanner-pi.local \
