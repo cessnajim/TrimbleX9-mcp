@@ -490,9 +490,18 @@ async def scanner_registration(project_id: str) -> list:
     The frame is the first station's, not north: describe places to the
     person by landmarks and station numbers ("past station 3, along the long
     wall"), never by coordinates or compass words. `registering_job_id` is set
-    while a registration runs. A station that won't place shares too little
-    wall with the others: set up the next one where it sees walls an earlier
-    station saw."""
+    while a registration runs.
+
+    Trust the verdicts, not the picture: each station is `confirmed` (two or
+    more ties, and fresh fits, free space and the ground agree), `single`
+    (one tie), `frame`, `doubtful` (a check finds it off against most of its
+    neighbours), `ambiguous` (symmetric or repeated walls: it fits in more
+    than one place) or `unplaced`; `reasons` say why. Only confirmed, single
+    and frame stations count towards wall coverage. Plan the next station to
+    settle what isn't trusted: one that sees walls an earlier station saw
+    (unplaced), something that breaks the symmetry such as a corner, door or
+    tree (ambiguous), or the same area again from another spot (doubtful,
+    single). `rejected_pairs` lists fits that were not used, and why."""
     v = await _call("GET", f"/projects/{_seg(project_id)}/registration")
     if not any(st.get("placed") for st in v.get("stations", [])):
         return [json.dumps(v, indent=2)]
@@ -822,7 +831,8 @@ async def survey_mission(project_id: str, goal: str) -> str:
         "facades covered from the geometry, so don't mark them by eye.",
         "3. While targets are open: choose the next station for what is still open, not the biggest shadow "
         "(the plan shows open walls in red; scanner_wall_face gives their unseen stretches). "
-        "Keep each new station in sight of walls an earlier station saw, or it can't be registered. "
+        "Keep each new station in sight of walls an earlier station saw, or it can't be registered; "
+        "a station that isn't confirmed (doubtful, ambiguous, unplaced) doesn't count, so the next one should settle it. "
         "scanner_propose_station marks it on the preview with directions by landmarks (never compass words); "
         "tell the person in one or two lines and wait for them to say they've moved.",
         "4. A target you can't cover (a locked yard, a neighbour's wall) is declined, with the reason.",
