@@ -410,7 +410,12 @@ async def scanner_coverage(scan_id: str) -> list:
     `shadows_assessed` says), dark nothing; a white cross marks the scanner.
     Use it to decide whether a station saw enough or where the next station
     should go; a shadow behind furniture or a door is what another station
-    fills. The first call on a scan decodes it (seconds)."""
+    fills. The plans up and right are the scanners own axes (wherever its
+    zero angle pointed when set up, different at every station), not north or
+    east: never give the person compass words. Direct them by landmarks they
+    can see on site, from the scan and its preview ("about 4 m past the shed
+    door, level with the deck corner"). The first call on a scan decodes it
+    (seconds)."""
     cov = await _call("GET", f"/scans/{_seg(scan_id)}/coverage")
     async with httpx.AsyncClient(timeout=TIMEOUT) as c:
         r = await c.get(f"{URL}/scans/{_seg(scan_id)}/coverage/image", headers=_headers())
