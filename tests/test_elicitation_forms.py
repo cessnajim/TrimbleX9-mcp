@@ -10,6 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
+try:  # Elicitation needs an SDK that has it (mcp 1.7 does not); the servers fallback is tested elsewhere.
+    from mcp.types import ClientCapabilities, ElicitationCapability
+    ClientCapabilities(elicitation=ElicitationCapability())
+except Exception:  # pragma: no cover
+    pytest.skip("this mcp SDK has no elicitation", allow_module_level=True)
+
 
 def bridge_module():
     # Imported late: test_offline sets the environment scanner_mcp reads at import.
