@@ -112,7 +112,7 @@ def fn(tool):
 def test_tools_are_listed_without_operator_tools(tools):
     names = {t.name for t in run(tools.mcp.list_tools())}
     assert {"scanner_status", "scanner_start_scan", "scanner_preview", "scanner_aim", "scanner_export",
-            "scanner_start_run", "scanner_advance_run", "scanner_propose", "scanner_measure", "scanner_measurement", "scanner_coverage", "scanner_permissions"} <= names
+            "scanner_start_run", "scanner_advance_run", "scanner_propose", "scanner_measure", "scanner_measurement", "scanner_coverage", "scanner_permissions", "scanner_propose_station"} <= names
     assert not any("approve" in n or "grant" in n or "delete" in n for n in names)
 
 
@@ -296,3 +296,17 @@ def test_a_plain_scan_asks_permission_once_too(tools):
     job2 = run(fn(tools.scanner_start_scan)(p, "STD_L0", ctx=again))
     assert job2["permission"] == "already given" and again.asked == []
     run(fn(tools.scanner_cancel_job)(job2["job_id"]))
+
+
+@pytest.mark.skipif(not FIX, reason="needs X9_FIXTURES for a preview")
+def test_propose_station_draws_the_spot(tools):
+    station = tools._state["station"]
+    out = run(fn(tools.scanner_propose_station)(
+        station, "Set up past the door, on the rug.", 900, 600, "by the door",
+        labels=[{"x": 500, "y": 450, "text": "Window: seen", "kind": "seen"}],
+        boxes=[{"x0": 523, "y0": 418, "x1": 674, "y1": 564, "text": "The window", "kind": "seen"}]))
+    v = json.loads(out[0])
+    assert v["marker"] == {"x": 900, "y": 600, "label": "by the door"} and v["proposed_by"] == "claude"
+    assert out[1].data[1:4] == b"PNG"
+    with pytest.raises(Exception, match="marker"):
+        run(fn(tools.scanner_propose_station)(station, "x", 99999, 1))

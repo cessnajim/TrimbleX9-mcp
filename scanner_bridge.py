@@ -400,6 +400,32 @@ async def scanner_measurement(measurement_id: str) -> list:
     return [json.dumps(m, indent=2), Image(data=r.content, format="png")]
 
 
+@tool(annotations=WRITE)
+async def scanner_propose_station(scan_id: str, note: str, marker_x: int, marker_y: int, marker_label: str = "",
+                                  labels: list | None = None, boxes: list | None = None) -> list:
+    """Show the person where to set up next (bridge 0.8.0+): the bridge draws a
+    "SET UP HERE" tripod on this station's preview at (marker_x, marker_y),
+    with your labels and boxes, and shows it in its web UI with your `note`.
+    Returns the picture; show it in the chat too.
+
+    Coordinates are preview pixels (scanner_preview gives the size): put the
+    marker on the ground where the tripod should stand. `note`: the directions
+    in prose, by landmarks the person can see ("carry the tripod past the house
+    corner onto the path, about 3 m beyond it"), never compass words.
+    `labels`: [{x, y, text, kind}] and `boxes`: [{x0, y0, x1, y1, text, kind}],
+    kind "seen" (green: covered here), "hidden" (red: what the next station is
+    for) or "landmark" (white: something to walk by). At most 12 in all,
+    texts up to 80 characters. A newer proposal for the scan replaces this one."""
+    body = {"marker": {"x": marker_x, "y": marker_y, "label": marker_label}, "note": note,
+            "labels": labels or [], "boxes": boxes or []}
+    v = await _call("PUT", f"/scans/{_seg(scan_id)}/next-station", body)
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.get(f"{URL}/scans/{_seg(scan_id)}/next-station/image", headers=_headers())
+    if r.status_code >= 400:
+        return [json.dumps(v, indent=2)]
+    return [json.dumps(v, indent=2), Image(data=r.content, format="png")]
+
+
 @tool(annotations=READ)
 async def scanner_coverage(scan_id: str) -> list:
     """What a scan covered (bridge 0.6.0+): point spacing at full resolution
@@ -409,8 +435,8 @@ async def scanner_coverage(scan_id: str) -> list:
     with no points at any height: something blocked it; full domes only, as
     `shadows_assessed` says), dark nothing; a white cross marks the scanner.
     Use it to decide whether a station saw enough or where the next station
-    should go; a shadow behind furniture or a door is what another station
-    fills. The plans up and right are the scanners own axes (wherever its
+    should go (then scanner_propose_station marks the spot on the preview);
+    a shadow behind furniture or a door is what another station fills. The plans up and right are the scanners own axes (wherever its
     zero angle pointed when set up, different at every station), not north or
     east: never give the person compass words. Direct them by landmarks they
     can see on site, from the scan and its preview ("about 4 m past the shed

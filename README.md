@@ -178,6 +178,7 @@ A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 | `scanner_measure` | write | Measure a window opening in a scan on the bridge (bridge 0.4.0+) |
 | `scanner_measurement` | read | A measurement's values, checks and evidence image |
 | `scanner_permissions` | read | Standing permissions to scan: project, expiry, scans left, who gave them, and the run they cover |
+| `scanner_propose_station` | write | Marks where to set up next on the station's preview (a tripod, labels, boxes) with prose directions; the bridge shows it in its web UI and returns the picture (bridge 0.8.0+) |
 | `scanner_coverage` | read | A scan's point spacing and coverage plan (seen, shadows), with the plan image (bridge 0.6.0+) |
 | `scanner_propose` | write | Propose a person step's answer (e.g. the box around the window) for a person to confirm (bridge 0.3.0+) |
 | `scanner_cancel_run` | **destructive** | Stop a run and any scan in flight |
