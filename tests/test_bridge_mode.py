@@ -116,7 +116,9 @@ def test_tools_are_listed_without_operator_tools(tools):
     assert not any("approve" in n or "grant" in n or "delete" in n for n in names)
 
 
-def test_scan_waits_for_approval_then_succeeds(tools):
+def test_scan_waits_for_approval_then_succeeds(tools, monkeypatch):
+    # Without a person token (no way to ask anyone), an agents scan waits for an operators approval.
+    monkeypatch.setattr(tools, "PERSON_TOKEN", "")
     st = run(fn(tools.scanner_status)())
     assert st["scanner"]["connected"]
     p = run(fn(tools.scanner_create_project)("mcp-bridge-test"))
@@ -282,3 +284,15 @@ def test_relayed_sign_off_is_recorded(tools):
     iv = r["interventions"]
     assert r["state"] == "succeeded" and iv["total"] == 1 and iv["corrected"] == 1 and iv["relayed"] == 1
     assert r["authorized_by"][0]["note"].startswith("relayed by the agent")
+
+
+def test_a_plain_scan_asks_permission_once_too(tools):
+    p = run(fn(tools.scanner_create_project)(f"scan-{int(time.time() * 1000)}"))["project_id"]
+    person = _Person([{"allow": True}])
+    job = run(fn(tools.scanner_start_scan)(p, "STD_L0", ctx=person))
+    assert job["permission"] == "given in the chat" and job["state"] in ("queued", "running") and len(person.asked) == 1
+    run(fn(tools.scanner_cancel_job)(job["job_id"]))
+    again = _Person([])
+    job2 = run(fn(tools.scanner_start_scan)(p, "STD_L0", ctx=again))
+    assert job2["permission"] == "already given" and again.asked == []
+    run(fn(tools.scanner_cancel_job)(job2["job_id"]))

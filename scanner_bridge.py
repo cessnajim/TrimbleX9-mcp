@@ -200,14 +200,55 @@ async def scanner_scan(scan_id: str) -> dict:
     return await _call("GET", f"/scans/{_seg(scan_id)}")
 
 
+async def _ensure_permission(project_id: str, person_said: str, ctx, tool: str) -> str:
+    """Make sure agents may scan in the project for this visit: a grant, or
+    ask the person once (in the chat, else relayed). Returns how."""
+    now = time.time()
+    covered = any(g.get("project_id") == project_id and not g.get("run_id")
+                  and (g.get("max_scans") is None or g.get("scans_used", 0) < g["max_scans"])
+                  for g in await _call("GET", "/grants"))
+    permission = "already given"
+    expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + VISIT_HOURS * 3600))
+    visit = {"project_id": project_id, "expires_at": expires, "max_scans": VISIT_SCANS}
+    name = project_id
+    if not covered:
+        name = next((p["name"] for p in await _call("GET", "/projects") if p.get("project_id") == project_id), project_id)
+    ask_yourself = (f"Ask the person in the chat: \"May I scan in {name} for the next {VISIT_HOURS:g} hours (up to "
+                    f"{VISIT_SCANS} scans)?\" If they agree, call " f"{tool} again with person_said = their words.")
+    if not covered and person_said.strip() and PERSON_TOKEN:
+        await _call_as_person("POST", "/grants", {**visit, "note": f"relayed by the agent: \u201c{person_said.strip()[:300]}\u201d"})
+        permission = "relayed from the chat"
+    elif not covered:
+        if _can_ask(ctx):
+            res = await ctx.elicit(message=f"Let the agent scan in \"{name}\" for the next {VISIT_HOURS:g} hours "
+                                           f"(up to {VISIT_SCANS} scans)? Nothing else is asked before the result.",
+                                   schema=_Allow)
+            if res.action == "accept" and res.data.allow:
+                await _call_as_person("POST", "/grants", {**visit, "note": "asked in the chat"})
+                permission = "given in the chat"
+            elif res.action == "accept":
+                raise ToolError("The person did not allow scanning here; nothing was started.")
+            else:
+                raise ToolError(f"No answer from the chat's question (action: {res.action}); some chat apps close it "
+                                f"without showing it. Nothing was started. If the person didn't see a question: {ask_yourself}")
+        elif PERSON_TOKEN:
+            raise ToolError(f"This chat can't ask the person directly. Nothing was started. {ask_yourself}")
+        else:
+            permission = ("none: no person token is set, so each run's first scan waits for approval "
+                          "in the bridge web UI (Approve the run), or they let agents scan from its Scans tab")
+    return permission
+
+
 @tool(annotations=WRITE)
 async def scanner_start_scan(
     project_id: str, mode: str, color: bool = False,
     start_ha: float | None = None, delta_ha: float | None = None,
     start_va: float | None = None, delta_va: float | None = None,
-    note: str | None = None,
+    note: str | None = None, person_said: str = "", ctx: Context = None,
 ) -> dict:
-    """Queue a scan. Without a window it is a full dome; give all four window
+    """Queue a scan. If the project has no permission to scan yet, this asks the
+    person once, in the chat, to allow scanning for the visit (as
+    scanner_start_run does; `person_said` as there). Without a window it is a full dome; give all four window
     angles (radians, VA from the zenith; get them from scanner_aim) for an area
     scan. Color adds ~150 s. The bridge checks the rules; with an agent token
     the job usually waits in `awaiting_approval` until a person approves it in
@@ -223,7 +264,12 @@ async def scanner_start_scan(
                           "start_va": start_va, "delta_va": delta_va}
     if note:
         body["note"] = note
-    return await _call("POST", "/scans", body)
+    # Ask only for a request the scanner can run; let the bridge reject the rest.
+    known = mode in {m.get("mode") for m in await _call("GET", "/scan-modes")}
+    permission = await _ensure_permission(project_id, person_said, ctx, "scanner_start_scan") if known else "not asked"
+    job = await _call("POST", "/scans", body)
+    job["permission"] = permission
+    return job
 
 
 # -------------------------------------------------------------------- jobs ---
@@ -423,39 +469,7 @@ async def scanner_start_run(recipe_id: str, project_id: str, inputs: dict | None
     steps yourself with scanner_advance_run; for the sign-off use
     scanner_sign_off) or `waiting_for: approval` when no permission covers a
     scan. Follow it with scanner_run."""
-    now = time.time()
-    covered = any(g.get("project_id") == project_id and not g.get("run_id")
-                  and (g.get("max_scans") is None or g.get("scans_used", 0) < g["max_scans"])
-                  for g in await _call("GET", "/grants"))
-    permission = "already given"
-    expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + VISIT_HOURS * 3600))
-    visit = {"project_id": project_id, "expires_at": expires, "max_scans": VISIT_SCANS}
-    name = project_id
-    if not covered:
-        name = next((p["name"] for p in await _call("GET", "/projects") if p.get("project_id") == project_id), project_id)
-    ask_yourself = (f"Ask the person in the chat: \"May I scan in {name} for the next {VISIT_HOURS:g} hours (up to "
-                    f"{VISIT_SCANS} scans)?\" If they agree, call scanner_start_run again with person_said = their words.")
-    if not covered and person_said.strip() and PERSON_TOKEN:
-        await _call_as_person("POST", "/grants", {**visit, "note": f"relayed by the agent: \u201c{person_said.strip()[:300]}\u201d"})
-        permission = "relayed from the chat"
-    elif not covered:
-        if _can_ask(ctx):
-            res = await ctx.elicit(message=f"Let the agent scan in \"{name}\" for the next {VISIT_HOURS:g} hours "
-                                           f"(up to {VISIT_SCANS} scans)? You'll be asked once more, to sign off the result.",
-                                   schema=_Allow)
-            if res.action == "accept" and res.data.allow:
-                await _call_as_person("POST", "/grants", {**visit, "note": "asked in the chat"})
-                permission = "given in the chat"
-            elif res.action == "accept":
-                raise ToolError("The person did not allow scanning here; no run was started.")
-            else:
-                raise ToolError(f"No answer from the chat's question (action: {res.action}); some chat apps close it "
-                                f"without showing it. No run was started. If the person didn't see a question: {ask_yourself}")
-        elif PERSON_TOKEN:
-            raise ToolError(f"This chat can't ask the person directly. No run was started. {ask_yourself}")
-        else:
-            permission = ("none: no person token is set, so each run's first scan waits for approval "
-                          "in the bridge web UI (Approve the run), or they let agents scan from its Scans tab")
+    permission = await _ensure_permission(project_id, person_said, ctx, "scanner_start_run")
     run = await _call("POST", "/runs", {"recipe_id": recipe_id, "project_id": project_id, "inputs": inputs or {}})
     run["permission"] = permission
     return run
