@@ -181,6 +181,8 @@ A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 | `scanner_propose_station` | write | Marks where to set up next on the station's preview (a tripod, labels, boxes) with prose directions; the bridge shows it in its web UI and returns the picture (bridge 0.8.0+) |
 | `scanner_set_mission` | write | Sets what the job is for (the person's goal, kind, done-when criteria) and its first ledger targets (bridge 0.8.0+) |
 | `scanner_mission` | read | The mission, its state and its ledger |
+| `scanner_registration` | read | The project's stations in one frame (registered by the bridge after each full dome), the walls found, and the plan picture (bridge 0.9.0+) |
+| `scanner_wall_face` | read | How much of a wall face the registered stations saw: share of its length, spacing, stations, unseen stretches (bridge 0.9.0+) |
 | `scanner_update_targets` | write | Adds or updates ledger targets: open, covered (by stations), measured (with a measurement), declined (with a reason) |
 | `scanner_ready_to_leave` | write (asks the person) | Says the job is done (refused while a target is open) and asks the person to sign it off in the chat, or relays their words |
 | `scanner_coverage` | read | A scan's point spacing and coverage plan (seen, shadows), with the plan image (bridge 0.6.0+) |
@@ -239,6 +241,12 @@ stations, measured, or declined with a reason. It chooses the next station for
 what is still open, and `scanner_ready_to_leave` is refused while anything is.
 Then the person signs the job off once, in the chat (or relayed), and the
 mission is done. The `survey_mission` prompt runs the whole visit.
+
+From bridge 0.9.0 the bridge registers every full dome into one project
+frame by itself. Facade targets then name their wall (`wall_id` from
+`scanner_registration`), and the bridge covers them from the geometry: a
+wall seen over 80% of its length is covered, with the stations that saw it,
+and `covered` is refused while less is seen.
 
 ## Safety
 

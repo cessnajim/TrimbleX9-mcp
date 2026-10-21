@@ -438,7 +438,8 @@ async def scanner_set_mission(project_id: str, goal: str, kind: str, done_when: 
     Then keep a ledger of targets with scanner_update_targets: each facade,
     each window, … The mission frames your station advice (go after what is
     still open) and ends with scanner_ready_to_leave. Replaces any earlier
-    mission on the project."""
+    mission on the project. Once stations are registered (scanner_registration),
+    give facade targets their wall (`wall_id`) so the bridge judges them."""
     return await _call("PUT", f"/projects/{_seg(project_id)}/mission",
                        {"goal": goal, "kind": kind, "done_when": done_when, "targets": targets or []})
 
@@ -453,12 +454,65 @@ async def scanner_mission(project_id: str) -> dict:
 @tool(annotations=WRITE)
 async def scanner_update_targets(project_id: str, targets: list) -> dict:
     """Add or update ledger targets: [{target_id, name, kind, status, stations,
-    measurement_id, note}], by target_id (letters, digits, - or _; fields left
-    out keep their value). status: open, covered (name the scan ids in
-    `stations`), measured (also `measurement_id`) or declined (say why in
-    `note`). Add targets as soon as you know they exist (the far facade you
-    haven't seen yet is `open`), so the ledger shows what is left."""
+    measurement_id, note, wall_id, face}], by target_id (letters, digits, - or
+    _; fields left out keep their value). status: open, covered (name the scan
+    ids in `stations`), measured (also `measurement_id`) or declined (say why
+    in `note`). Add targets as soon as you know they exist (the far facade you
+    haven't seen yet is `open`), so the ledger shows what is left.
+
+    A facade or wall target should name its wall (bridge 0.9.0+): `wall_id`
+    from scanner_registration's walls, or `face`: {from: [x, y], to: [x, y]}
+    in the project frame (metres) for a stretch no wall covers yet. The bridge
+    then judges it from the registered stations and keeps its `geometry`
+    (share of its length seen, spacing, stations, unseen stretches): it marks
+    it covered itself once 80% is seen, re-judges it after every station, and
+    refuses `covered` while less is seen. Don't mark wall targets covered by
+    eye; leave them open and let the geometry decide."""
     return await _call("POST", f"/projects/{_seg(project_id)}/mission/targets", {"targets": targets})
+
+
+# ------------------------------------------------------------ registration ---
+
+
+@tool(annotations=READ)
+async def scanner_registration(project_id: str) -> list:
+    """The project's stations in one frame (bridge 0.9.0+). The bridge
+    registers every full dome by itself a few seconds to a minute after it
+    lands: `summary` says how many are placed and how well the pairs agree,
+    each station has `placed`, `turn_deg` and `xyz_m`, and `walls` are the
+    straight walls found in the merged plan ({wall_id, from, to, length_m,
+    z_m, seen_by: station numbers}). Returns the plan picture too: walls with
+    their ids, stations numbered with a tick for the way each faced, the
+    mission's wall targets (green covered, red open, grey declined), on a 5 m
+    grid. Read it to learn the building's outline and to choose the next
+    station: an open wall target's unseen stretch is what it's for.
+
+    The frame is the first station's, not north: describe places to the
+    person by landmarks and station numbers ("past station 3, along the long
+    wall"), never by coordinates or compass words. `registering_job_id` is set
+    while a registration runs. A station that won't place shares too little
+    wall with the others: set up the next one where it sees walls an earlier
+    station saw."""
+    v = await _call("GET", f"/projects/{_seg(project_id)}/registration")
+    if not any(st.get("placed") for st in v.get("stations", [])):
+        return [json.dumps(v, indent=2)]
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.get(f"{URL}/projects/{_seg(project_id)}/registration/plan", headers=_headers())
+    if r.status_code >= 400:
+        return [json.dumps(v, indent=2)]
+    return [json.dumps(v, indent=2), Image(data=r.content, format="png")]
+
+
+@tool(annotations=READ)
+async def scanner_wall_face(project_id: str, wall_id: str = "", from_xy: list | None = None, to_xy: list | None = None) -> dict:
+    """How much of a wall face the registered stations saw, without changing
+    anything (bridge 0.9.0+): a `wall_id` from scanner_registration, or a
+    stretch `from_xy`/`to_xy` ([x, y], project frame, metres). Returns
+    seen_share (of its length; 0.8 counts as covered), spacing_mm, height_m,
+    the stations that saw it and the `unseen` stretches. Use it to check a
+    facade before planning the next station."""
+    body = {"wall_id": wall_id} if wall_id else {"from": from_xy, "to": to_xy}
+    return await _call("POST", f"/projects/{_seg(project_id)}/registration/face", body)
 
 
 class _SignOffJob(BaseModel):
@@ -763,7 +817,12 @@ async def survey_mission(project_id: str, goal: str) -> str:
         "2. At each station: a full dome (scanner_start_scan; it asks the person once for the visit's permission), "
         "then scanner_coverage and scanner_preview. Update the ledger with scanner_update_targets: add every target "
         "you can see or infer (each facade, each window), mark what this station covered with its scan id, keep the rest open.",
-        "3. While targets are open: choose the next station for what is still open, not the biggest shadow. "
+        "   From the second station on, the bridge registers each dome into one frame by itself: read scanner_registration "
+        "(wait while registering_job_id is set). Give each facade target its wall_id from the plan; the bridge then marks "
+        "facades covered from the geometry, so don't mark them by eye.",
+        "3. While targets are open: choose the next station for what is still open, not the biggest shadow "
+        "(the plan shows open walls in red; scanner_wall_face gives their unseen stretches). "
+        "Keep each new station in sight of walls an earlier station saw, or it can't be registered. "
         "scanner_propose_station marks it on the preview with directions by landmarks (never compass words); "
         "tell the person in one or two lines and wait for them to say they've moved.",
         "4. A target you can't cover (a locked yard, a neighbour's wall) is declined, with the reason.",

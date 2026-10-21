@@ -112,7 +112,7 @@ def fn(tool):
 def test_tools_are_listed_without_operator_tools(tools):
     names = {t.name for t in run(tools.mcp.list_tools())}
     assert {"scanner_status", "scanner_start_scan", "scanner_preview", "scanner_aim", "scanner_export",
-            "scanner_start_run", "scanner_advance_run", "scanner_propose", "scanner_measure", "scanner_measurement", "scanner_coverage", "scanner_permissions", "scanner_propose_station", "scanner_set_mission", "scanner_update_targets", "scanner_ready_to_leave"} <= names
+            "scanner_start_run", "scanner_advance_run", "scanner_propose", "scanner_measure", "scanner_measurement", "scanner_coverage", "scanner_permissions", "scanner_propose_station", "scanner_set_mission", "scanner_update_targets", "scanner_ready_to_leave", "scanner_registration", "scanner_wall_face"} <= names
     assert not any("approve" in n or "grant" in n or "delete" in n for n in names)
 
 
@@ -332,3 +332,12 @@ def test_mission_ledger_and_sign_off_in_the_chat(tools):
     assert out["signed_off"] and out["mission"]["state"] == "signed_off" and out["mission"]["signed_off_by"] == "jim"
     assert out["mission"]["confirmed_via"] == "asked in the chat" and "Ready to leave" in person.asked[-1]
     assert "1 covered, 1 declined" in person.asked[-1]
+
+
+def test_registration_before_and_after_a_station(tools):
+    p = run(fn(tools.scanner_create_project)(f"reg-{int(time.time() * 1000)}"))["project_id"]
+    out = run(fn(tools.scanner_registration)(p))
+    v = json.loads(out[0])
+    assert v["stations"] == [] and "Not registered yet" in v["summary"]
+    with pytest.raises(Exception, match="not registered"):
+        run(fn(tools.scanner_wall_face)(p, from_xy=[0, 0], to_xy=[5, 0]))
