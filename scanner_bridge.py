@@ -426,6 +426,80 @@ async def scanner_propose_station(scan_id: str, note: str, marker_x: int, marker
     return [json.dumps(v, indent=2), Image(data=r.content, format="png")]
 
 
+# ---------------------------------------------------------------- missions ---
+
+
+@tool(annotations=WRITE)
+async def scanner_set_mission(project_id: str, goal: str, kind: str, done_when: str, targets: list | None = None) -> dict:
+    """Set what the job is for (bridge 0.8.0+), from the person's sentence:
+    `goal` (their words), `kind` (exterior, windows, room or custom) and
+    `done_when`: your criteria in prose, concrete enough to check ("every
+    facade seen at <= 12 mm spacing with no shadow on the house's walls").
+    Then keep a ledger of targets with scanner_update_targets: each facade,
+    each window, … The mission frames your station advice (go after what is
+    still open) and ends with scanner_ready_to_leave. Replaces any earlier
+    mission on the project."""
+    return await _call("PUT", f"/projects/{_seg(project_id)}/mission",
+                       {"goal": goal, "kind": kind, "done_when": done_when, "targets": targets or []})
+
+
+@tool(annotations=READ)
+async def scanner_mission(project_id: str) -> dict:
+    """The project's mission: goal, done_when, state (active, ready,
+    signed_off) and the ledger of targets with their status and stations."""
+    return await _call("GET", f"/projects/{_seg(project_id)}/mission")
+
+
+@tool(annotations=WRITE)
+async def scanner_update_targets(project_id: str, targets: list) -> dict:
+    """Add or update ledger targets: [{target_id, name, kind, status, stations,
+    measurement_id, note}], by target_id (letters, digits, - or _; fields left
+    out keep their value). status: open, covered (name the scan ids in
+    `stations`), measured (also `measurement_id`) or declined (say why in
+    `note`). Add targets as soon as you know they exist (the far facade you
+    haven't seen yet is `open`), so the ledger shows what is left."""
+    return await _call("POST", f"/projects/{_seg(project_id)}/mission/targets", {"targets": targets})
+
+
+class _SignOffJob(BaseModel):
+    confirm: bool = Field(True, description="Sign the job off: nothing more will be added")
+
+
+@tool(annotations=WRITE)
+async def scanner_ready_to_leave(project_id: str, summary: str, person_said: str = "", ctx: Context = None) -> dict:
+    """Say the job is done and ask the person to sign it off: the bridge
+    refuses while any ledger target is open (and says which). `summary`: what
+    was covered or measured and what was declined and why, in two or three
+    lines. The person is asked in the chat; if the chat can't ask, ask them
+    yourself ("Ready to leave: … Sign it off?") and call again with
+    `person_said` (their exact words, only if they agreed). This sign-off is
+    the job's last person intervention."""
+    m = await _call("GET", f"/projects/{_seg(project_id)}/mission")
+    if m.get("state") != "ready":
+        m = await _call("POST", f"/projects/{_seg(project_id)}/mission/ready", {"summary": summary})
+    tally = ", ".join(f"{n} {s}" for s in ("covered", "measured", "declined")
+                      if (n := sum(1 for t in m["targets"] if t["status"] == s)))
+    question = f"Ready to leave: {m['goal']} ({tally}). {summary.strip()} Sign the job off?"
+    if person_said.strip() and PERSON_TOKEN:
+        done = await _call_as_person("POST", f"/projects/{_seg(project_id)}/mission/sign-off",
+                                     {"confirmed_via": f"relayed by the agent: \u201c{person_said.strip()[:300]}\u201d"})
+        return {"signed_off": True, "relayed": True, "mission": done}
+    ask_yourself = f"Ask the person in the chat: \"{question}\" If they agree, call scanner_ready_to_leave again with person_said = their words."
+    if not _can_ask(ctx):
+        if PERSON_TOKEN:
+            return {"signed_off": False, "asked": False, "ready": True, "message": f"This chat can't ask the person directly. {ask_yourself}"}
+        return {"signed_off": False, "asked": False, "ready": True,
+                "message": "The job is ready to leave; the person signs it off in the bridge web UI (Now, Mission)."}
+    res = await ctx.elicit(message=question, schema=_SignOffJob)
+    if res.action != "accept":
+        return {"signed_off": False, "asked": True, "action": res.action, "ready": True,
+                "message": f"No answer from the chat's question; some chat apps close it without showing it. If the person didn't see it: {ask_yourself}"}
+    if not res.data.confirm:
+        return {"signed_off": False, "asked": True, "ready": True, "message": "The person didn't sign it off yet; ask what is missing."}
+    done = await _call_as_person("POST", f"/projects/{_seg(project_id)}/mission/sign-off", {"confirmed_via": "asked in the chat"})
+    return {"signed_off": True, "mission": done}
+
+
 @tool(annotations=READ)
 async def scanner_coverage(scan_id: str) -> list:
     """What a scan covered (bridge 0.6.0+): point spacing at full resolution
@@ -676,6 +750,27 @@ async def run_recipe(recipe_id: str, project_id: str) -> str:
               "Report each measured value with its uncertainty, the person interventions the run counted, "
               "and say plainly if a check failed or a step was declined."]
     return "\n".join(lines)
+
+
+@mcp.prompt()
+async def survey_mission(project_id: str, goal: str) -> str:
+    """Run a site visit toward one goal, from the person's sentence to a signed-off ledger."""
+    return "\n".join([
+        f"The person wants: \"{goal}\" (project {project_id}). You run the visit; they carry the tripod and sign off once at the end.",
+        "",
+        "1. scanner_set_mission: their words as goal, the kind (exterior, windows, room or custom), and done_when: "
+        "criteria concrete enough to check (spacing, which walls, no shadows on what).",
+        "2. At each station: a full dome (scanner_start_scan; it asks the person once for the visit's permission), "
+        "then scanner_coverage and scanner_preview. Update the ledger with scanner_update_targets: add every target "
+        "you can see or infer (each facade, each window), mark what this station covered with its scan id, keep the rest open.",
+        "3. While targets are open: choose the next station for what is still open, not the biggest shadow. "
+        "scanner_propose_station marks it on the preview with directions by landmarks (never compass words); "
+        "tell the person in one or two lines and wait for them to say they've moved.",
+        "4. A target you can't cover (a locked yard, a neighbour's wall) is declined, with the reason.",
+        "5. When nothing is open: scanner_ready_to_leave with a two-or-three-line summary; the person signs off.",
+        "",
+        "Ask the person nothing else. Report at the end: stations used, the ledger, and anything declined.",
+    ])
 
 
 def main() -> None:

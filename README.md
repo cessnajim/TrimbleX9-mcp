@@ -179,6 +179,10 @@ A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 | `scanner_measurement` | read | A measurement's values, checks and evidence image |
 | `scanner_permissions` | read | Standing permissions to scan: project, expiry, scans left, who gave them, and the run they cover |
 | `scanner_propose_station` | write | Marks where to set up next on the station's preview (a tripod, labels, boxes) with prose directions; the bridge shows it in its web UI and returns the picture (bridge 0.8.0+) |
+| `scanner_set_mission` | write | Sets what the job is for (the person's goal, kind, done-when criteria) and its first ledger targets (bridge 0.8.0+) |
+| `scanner_mission` | read | The mission, its state and its ledger |
+| `scanner_update_targets` | write | Adds or updates ledger targets: open, covered (by stations), measured (with a measurement), declined (with a reason) |
+| `scanner_ready_to_leave` | write (asks the person) | Says the job is done (refused while a target is open) and asks the person to sign it off in the chat, or relays their words |
 | `scanner_coverage` | read | A scan's point spacing and coverage plan (seen, shadows), with the plan image (bridge 0.6.0+) |
 | `scanner_propose` | write | Propose a person step's answer (e.g. the box around the window) for a person to confirm (bridge 0.3.0+) |
 | `scanner_cancel_run` | **destructive** | Stop a run and any scan in flight |
@@ -224,6 +228,17 @@ answer. So the bridge records it: the grant's `note` reads "relayed by the
 agent: "…"", the sign-off's input has `confirmed_via`, and the run counts it in
 `interventions.relayed`. Questions answered in a dialog are noted "asked in
 the chat".
+
+## Missions: a defined "done"
+
+The person's sentence ("scan the exterior of the house", "measure all the
+windows") becomes the project's mission: their goal, a kind, and done-when
+criteria the agent writes, concrete enough to check. The agent keeps a ledger
+of targets (each facade, each window) as it works: open, covered by named
+stations, measured, or declined with a reason. It chooses the next station for
+what is still open, and `scanner_ready_to_leave` is refused while anything is.
+Then the person signs the job off once, in the chat (or relayed), and the
+mission is done. The `survey_mission` prompt runs the whole visit.
 
 ## Safety
 

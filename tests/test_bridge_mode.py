@@ -112,7 +112,7 @@ def fn(tool):
 def test_tools_are_listed_without_operator_tools(tools):
     names = {t.name for t in run(tools.mcp.list_tools())}
     assert {"scanner_status", "scanner_start_scan", "scanner_preview", "scanner_aim", "scanner_export",
-            "scanner_start_run", "scanner_advance_run", "scanner_propose", "scanner_measure", "scanner_measurement", "scanner_coverage", "scanner_permissions", "scanner_propose_station"} <= names
+            "scanner_start_run", "scanner_advance_run", "scanner_propose", "scanner_measure", "scanner_measurement", "scanner_coverage", "scanner_permissions", "scanner_propose_station", "scanner_set_mission", "scanner_update_targets", "scanner_ready_to_leave"} <= names
     assert not any("approve" in n or "grant" in n or "delete" in n for n in names)
 
 
@@ -310,3 +310,25 @@ def test_propose_station_draws_the_spot(tools):
     assert out[1].data[1:4] == b"PNG"
     with pytest.raises(Exception, match="marker"):
         run(fn(tools.scanner_propose_station)(station, "x", 99999, 1))
+
+
+def test_mission_ledger_and_sign_off_in_the_chat(tools):
+    p = run(fn(tools.scanner_create_project)(f"mission-{int(time.time() * 1000)}"))["project_id"]
+    m = run(fn(tools.scanner_set_mission)(p, "Scan the exterior of the house", "exterior",
+                                          "Every facade seen, no shadow on the house walls",
+                                          [{"target_id": "north", "name": "North facade", "kind": "facade"}]))
+    assert m["state"] == "active" and m["targets"][0]["status"] == "open"
+    person = _Person([{"allow": True}, {"confirm": True}])
+    job = run(fn(tools.scanner_start_scan)(p, "STD_L0", ctx=person))
+    w = run(fn(tools.scanner_wait_for_job)(_Ctx(), job["job_id"], timeout_s=120))
+    scan = w["job"]["result"]["scan_id"]
+    with pytest.raises(Exception, match="still open: North facade"):
+        run(fn(tools.scanner_ready_to_leave)(p, "All facades seen.", ctx=person))
+    with pytest.raises(Exception, match="names the stations"):
+        run(fn(tools.scanner_update_targets)(p, [{"target_id": "north", "status": "covered"}]))
+    run(fn(tools.scanner_update_targets)(p, [{"target_id": "north", "status": "covered", "stations": [scan]},
+                                             {"target_id": "south", "name": "South facade", "status": "declined", "note": "neighbour's yard, locked"}]))
+    out = run(fn(tools.scanner_ready_to_leave)(p, "North seen from station 1; south declined (locked yard).", ctx=person))
+    assert out["signed_off"] and out["mission"]["state"] == "signed_off" and out["mission"]["signed_off_by"] == "jim"
+    assert out["mission"]["confirmed_via"] == "asked in the chat" and "Ready to leave" in person.asked[-1]
+    assert "1 covered, 1 declined" in person.asked[-1]
