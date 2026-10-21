@@ -12,6 +12,7 @@ Config:
   SCANNER_DOWNLOAD_DIR  Where downloads are written (default ~/scanner-downloads)
 """
 import asyncio
+import json
 import math
 import os
 import time
@@ -282,6 +283,29 @@ async def scanner_export_info(export_id: str) -> dict:
     """An export's point count, bounds and automatic checks (point count,
     levelled, coordinates, intensity source). Mention any failed check."""
     return await _call("GET", f"/exports/{_seg(export_id)}")
+
+
+@tool(annotations=WRITE)
+async def scanner_measure(scan_id: str, kind: str = "opening") -> dict:
+    """Measure a feature in a scan on the bridge (bridge 0.4.0+). `opening`:
+    a window's finished opening (the hole in the wall face) from a levelled
+    close-up with wall on every side. Returns a job; follow it with
+    scanner_wait_for_job, then read the result with scanner_measurement."""
+    return await _call("POST", f"/scans/{_seg(scan_id)}/measurements", {"kind": kind})
+
+
+@tool(annotations=READ)
+async def scanner_measurement(measurement_id: str) -> list:
+    """A measurement's values (metres, with uncertainties), checks, and its
+    evidence image: the wall face (grey), the opening (green) and the
+    measuring row and column (red). Look at the image before reporting: the
+    green area should fill the window up to the wall. Mention failed checks."""
+    m = await _call("GET", f"/measurements/{_seg(measurement_id)}")
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.get(f"{URL}/measurements/{_seg(measurement_id)}/evidence", headers=_headers())
+    if r.status_code >= 400:
+        return [json.dumps(m, indent=2)]
+    return [json.dumps(m, indent=2), Image(data=r.content, format="png")]
 
 
 @tool(annotations=WRITE)

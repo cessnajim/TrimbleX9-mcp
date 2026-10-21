@@ -94,7 +94,7 @@ def fn(tool):
 def test_tools_are_listed_without_operator_tools(tools):
     names = {t.name for t in run(tools.mcp.list_tools())}
     assert {"scanner_status", "scanner_start_scan", "scanner_preview", "scanner_aim", "scanner_export",
-            "scanner_start_run", "scanner_advance_run", "scanner_propose"} <= names
+            "scanner_start_run", "scanner_advance_run", "scanner_propose", "scanner_measure", "scanner_measurement"} <= names
     assert not any("approve" in n or "grant" in n or "delete" in n for n in names)
 
 
