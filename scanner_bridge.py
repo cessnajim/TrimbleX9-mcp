@@ -272,9 +272,10 @@ async def scanner_aim(reference_scan_id: str, x0: int, y0: int, x1: int, y1: int
 
 @tool(annotations=WRITE)
 async def scanner_export(scan_id: str, format: str = "ply", intensity: str = "auto") -> dict:
-    """Decode a scan to levelled points (format `ply` or `las`; intensity
-    `auto`, `preview` or `none`). Returns a job; when it succeeds its result
-    has an export_id for scanner_export_info and scanner_download_export."""
+    """Decode a scan to levelled points (format `ply`, `las`, or `copc` for a
+    Cloud Optimized Point Cloud, bridge 0.6.0+; intensity `auto`, `preview` or
+    `none`). Returns a job; when it succeeds its result has an export_id for
+    scanner_export_info and scanner_download_export."""
     return await _call("POST", f"/scans/{_seg(scan_id)}/exports", {"format": format, "intensity": intensity})
 
 
@@ -308,11 +309,34 @@ async def scanner_measurement(measurement_id: str) -> list:
     return [json.dumps(m, indent=2), Image(data=r.content, format="png")]
 
 
+@tool(annotations=READ)
+async def scanner_coverage(scan_id: str) -> list:
+    """What a scan covered (bridge 0.6.0+): point spacing at full resolution
+    (median, 90th percentile, and the share that is fine ≤ 6 mm, good ≤ 12,
+    coarse ≤ 25, sparse beyond) and a plan from above in 10 cm cells: green
+    seen, red shadow (floor nearer than the farthest return in that direction
+    with no points at any height: something blocked it; full domes only, as
+    `shadows_assessed` says), dark nothing; a white cross marks the scanner.
+    Use it to decide whether a station saw enough or where the next station
+    should go; a shadow behind furniture or a door is what another station
+    fills. The first call on a scan decodes it (seconds)."""
+    cov = await _call("GET", f"/scans/{_seg(scan_id)}/coverage")
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.get(f"{URL}/scans/{_seg(scan_id)}/coverage/image", headers=_headers())
+    if r.status_code >= 400:
+        return [json.dumps(cov, indent=2)]
+    return [json.dumps(cov, indent=2), Image(data=r.content, format="png")]
+
+
 @tool(annotations=WRITE)
 async def scanner_download_export(export_id: str, filename: str | None = None, overwrite: bool = False) -> dict:
     """Download an export into SCANNER_DOWNLOAD_DIR (plain file name; no paths)."""
     info = await _call("GET", f"/exports/{_seg(export_id)}")
-    dest = direct._dest(filename, direct._default_name(export_id, info.get("format") or "ply"), overwrite)
+    fmt = info.get("format") or "ply"
+    default = direct._default_name(export_id, "laz" if fmt == "copc" else fmt)
+    if fmt == "copc":
+        default = default[: -len(".laz")] + ".copc.laz"
+    dest = direct._dest(filename, default, overwrite)
     n = await _download(f"/exports/{_seg(export_id)}/file", dest)
     return {"export_id": export_id, "bytes": n, "path": dest}
 

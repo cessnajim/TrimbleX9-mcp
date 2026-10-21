@@ -175,6 +175,7 @@ A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 | `scanner_advance_run` | write | Complete a person step of a run |
 | `scanner_measure` | write | Measure a window opening in a scan on the bridge (bridge 0.4.0+) |
 | `scanner_measurement` | read | A measurement's values, checks and evidence image |
+| `scanner_coverage` | read | A scan's point spacing and coverage plan (seen, shadows), with the plan image (bridge 0.6.0+) |
 | `scanner_propose` | write | Propose a person step's answer (e.g. the box around the window) for a person to confirm (bridge 0.3.0+) |
 | `scanner_cancel_run` | **destructive** | Stop a run and any scan in flight |
 | `scanner_log` | read | The field log |
