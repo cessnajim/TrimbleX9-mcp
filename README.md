@@ -94,6 +94,8 @@ All configuration is through environment variables.
 | `SCANNER_DOWNLOAD_DIR` | both | `~/scanner-downloads` | Directory that download tools write into and that `scanner_preview_to_angles` reads from. `~` is expanded and the path is resolved (symlinks followed) at start-up. Created on first download. Nothing is written outside it. |
 | `SCANNER_BRIDGE_URL` | bridge | unset | Bridge API base, e.g. `http://bridge.local:8795/v1`. Setting it selects bridge mode. A trailing `/` is removed. |
 | `SCANNER_BRIDGE_TOKEN` | bridge | unset | Bearer token issued by the bridge, sent as `Authorization: Bearer <token>`. Required in bridge mode. |
+| `SCANNER_PERSON_TOKEN` | bridge | unset | An `operator` token for the person at the scanner. Used only after they answer yes in the chat (MCP elicitation, which the model can't answer): to allow scanning for the visit and to sign off a run. The model never sees it. Without it, or with a client that can't ask, the person uses the bridge's web UI. |
+| `SCANNER_VISIT_HOURS` | bridge | 8 | How long the permission given in the chat lasts (up to 20 scans) |
 
 Timeouts are fixed in the code, not configurable:
 
@@ -175,6 +177,7 @@ A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 | `scanner_advance_run` | write | Complete a person step of a run |
 | `scanner_measure` | write | Measure a window opening in a scan on the bridge (bridge 0.4.0+) |
 | `scanner_measurement` | read | A measurement's values, checks and evidence image |
+| `scanner_permissions` | read | Standing permissions to scan: project, expiry, scans left, who gave them, and the run they cover |
 | `scanner_coverage` | read | A scan's point spacing and coverage plan (seen, shadows), with the plan image (bridge 0.6.0+) |
 | `scanner_propose` | write | Propose a person step's answer (e.g. the box around the window) for a person to confirm (bridge 0.3.0+) |
 | `scanner_cancel_run` | **destructive** | Stop a run and any scan in flight |
@@ -188,6 +191,38 @@ A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 | `run_recipe` | `recipe_id`, `project_id` | Fetches the recipe from the bridge and returns step-by-step instructions for walking it with the person: which inputs to ask for, then `scanner_start_run` and `scanner_run`, how each `action` / `person` / `check` step is handled, to ask for approval when the run waits for it, and to report measured values with their uncertainty. |
 
 Direct mode has no prompts.
+
+## The person, in the chat
+
+AI-first: the person says what they want and signs off the result; the agent
+does the rest. Two moments need the person, and both are asked in the chat
+itself, through MCP elicitation, where the answer comes from the person and
+not from the model:
+
+1. **Permission for the visit.** `scanner_start_run` checks for a grant in the
+   project. Without one it asks once: "Let the agent scan in "<project>" for
+   the next 8 hours (up to 20 scans)?". Yes creates the grant with
+   `SCANNER_PERSON_TOKEN`; no starts nothing. Later runs in the visit ask
+   nothing.
+2. **The sign-off.** `scanner_sign_off(run_id, summary)` asks about the
+   bridge's proposal at the run's sign-off step: confirm it, or change the
+   numbers, which the form shows prefilled with the proposal. The agent shows the evidence image in the chat first. This is the
+   run's one person intervention.
+
+Clients (October 2026): the Claude Code CLI shows elicitation from 2.1.76.
+The Claude desktop app's Code tab declares it but closes the question without
+showing it (seen 2026-10-21), and the desktop chat and claude.ai don't support
+it. A Claude Code `Elicitation` hook can answer without showing a dialog;
+don't configure one for this server.
+
+**When the chat can't ask** (or closes the question unshown), the tool says so
+and tells the agent to ask the person in plain chat, then call again with
+`person_said` = the person's exact words (and, for the sign-off, `corrections`
+for numbers they changed). That is weaker: the model carries the person's
+answer. So the bridge records it: the grant's `note` reads "relayed by the
+agent: "…"", the sign-off's input has `confirmed_via`, and the run counts it in
+`interventions.relayed`. Questions answered in a dialog are noted "asked in
+the chat".
 
 ## Safety
 

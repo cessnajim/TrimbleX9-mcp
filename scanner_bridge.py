@@ -10,6 +10,14 @@ Config:
   SCANNER_BRIDGE_URL    Bridge API base, e.g. http://bridge.local:8795/v1
   SCANNER_BRIDGE_TOKEN  Bearer token issued by the bridge (usually role `agent`)
   SCANNER_DOWNLOAD_DIR  Where downloads are written (default ~/scanner-downloads)
+  SCANNER_PERSON_TOKEN  Optional: an `operator` token for the person at the
+                        scanner. Used only after they answer yes in the chat
+                        (MCP elicitation, which the model cannot answer): to
+                        give the visit's permission to scan and to sign off a
+                        run. The model never sees it. Without it, or with a
+                        client that can't ask, the person uses the bridge's
+                        web UI instead.
+  SCANNER_VISIT_HOURS   How long the visit's permission lasts (default 8)
 """
 import asyncio
 import json
@@ -19,6 +27,7 @@ import time
 from urllib.parse import quote
 
 import httpx
+from pydantic import BaseModel, Field, create_model
 
 try:  # mcp 2.x renamed FastMCP to MCPServer
     from mcp.server.mcpserver import Context, Image
@@ -32,6 +41,9 @@ import scanner_mcp as direct  # download-path safety and error helpers
 
 URL = os.environ.get("SCANNER_BRIDGE_URL", "").rstrip("/")
 TOKEN = os.environ.get("SCANNER_BRIDGE_TOKEN", "")
+PERSON_TOKEN = os.environ.get("SCANNER_PERSON_TOKEN", "")
+VISIT_HOURS = float(os.environ.get("SCANNER_VISIT_HOURS", "8"))
+VISIT_SCANS = 20
 TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
 mcp = FastMCP("trimblex9-bridge")
@@ -84,6 +96,39 @@ async def _call(method: str, path: str, body=None, params=None):
         r = await c.request(method, f"{URL}{path}", json=body, params=params, headers=_headers())
     _raise(r)
     return r.json() if r.content else None
+
+
+async def _call_as_person(method: str, path: str, body=None):
+    """A call with the person's token: only after they said yes in the chat."""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.request(method, f"{URL}{path}", json=body, headers={"Authorization": f"Bearer {PERSON_TOKEN}"})
+    _raise(r)
+    return r.json() if r.content else None
+
+
+def _can_ask(ctx) -> bool:
+    """Whether the person can be asked in the chat: a person token is set and
+    the client declared elicitation."""
+    if not PERSON_TOKEN or ctx is None:
+        return False
+    try:
+        from mcp.types import ClientCapabilities, ElicitationCapability
+        return bool(ctx.session.check_client_capability(ClientCapabilities(elicitation=ElicitationCapability())))
+    except Exception:
+        return False
+
+
+class _Allow(BaseModel):
+    allow: bool = Field(True, description="Let the agent scan here")
+
+
+def _sign_off_form(numeric: list, given: dict) -> type[BaseModel]:
+    """The sign-off question: confirm, and each number prefilled with the
+    proposal. MCP forms take a default only as a real value of the field's
+    type, never null, so a number the person keeps is simply left as it is."""
+    fields = {n: (float, Field(given[n], description=f"{n.replace('_', ' ')} (change it if the proposal is wrong)"))
+              for n in numeric}
+    return create_model("SignOff", confirm=(bool, Field(True, description="Confirm as proposed")), **fields)
 
 
 async def _download(path: str, dest: str) -> int:
@@ -365,12 +410,127 @@ async def scanner_recipe(recipe_id: str) -> dict:
 
 
 @tool(annotations=WRITE)
-async def scanner_start_run(recipe_id: str, project_id: str, inputs: dict | None = None) -> dict:
-    """Start running a recipe in a project. The bridge executes its steps; it
-    pauses with `waiting_for: approval` (a person must approve a scan) or
-    `waiting_for: input` (a person step: supply its `needs` with
-    scanner_advance_run). Follow it with scanner_run."""
-    return await _call("POST", "/runs", {"recipe_id": recipe_id, "project_id": project_id, "inputs": inputs or {}})
+async def scanner_start_run(recipe_id: str, project_id: str, inputs: dict | None = None,
+                            person_said: str = "", ctx: Context = None) -> dict:
+    """Start running a recipe in a project. If the project has no permission
+    to scan yet, this asks the person once, in the chat, to allow scanning for
+    the visit; a refusal starts nothing. If the chat can't ask them, it says
+    so: ask the person yourself ("May I scan in <project> for the next N hours?")
+    and call again with `person_said`. `person_said`: only when the chat couldn't ask the person and they agreed
+    in this conversation: their own words, quoted exactly. The bridge records
+    that their answer was relayed by you. Never fill it otherwise. The bridge then executes the steps; it
+    pauses with `waiting_for: input` at a person step (answer `review = final`
+    steps yourself with scanner_advance_run; for the sign-off use
+    scanner_sign_off) or `waiting_for: approval` when no permission covers a
+    scan. Follow it with scanner_run."""
+    now = time.time()
+    covered = any(g.get("project_id") == project_id and not g.get("run_id")
+                  and (g.get("max_scans") is None or g.get("scans_used", 0) < g["max_scans"])
+                  for g in await _call("GET", "/grants"))
+    permission = "already given"
+    expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + VISIT_HOURS * 3600))
+    visit = {"project_id": project_id, "expires_at": expires, "max_scans": VISIT_SCANS}
+    name = project_id
+    if not covered:
+        name = next((p["name"] for p in await _call("GET", "/projects") if p.get("project_id") == project_id), project_id)
+    ask_yourself = (f"Ask the person in the chat: \"May I scan in {name} for the next {VISIT_HOURS:g} hours (up to "
+                    f"{VISIT_SCANS} scans)?\" If they agree, call scanner_start_run again with person_said = their words.")
+    if not covered and person_said.strip() and PERSON_TOKEN:
+        await _call_as_person("POST", "/grants", {**visit, "note": f"relayed by the agent: \u201c{person_said.strip()[:300]}\u201d"})
+        permission = "relayed from the chat"
+    elif not covered:
+        if _can_ask(ctx):
+            res = await ctx.elicit(message=f"Let the agent scan in \"{name}\" for the next {VISIT_HOURS:g} hours "
+                                           f"(up to {VISIT_SCANS} scans)? You'll be asked once more, to sign off the result.",
+                                   schema=_Allow)
+            if res.action == "accept" and res.data.allow:
+                await _call_as_person("POST", "/grants", {**visit, "note": "asked in the chat"})
+                permission = "given in the chat"
+            elif res.action == "accept":
+                raise ToolError("The person did not allow scanning here; no run was started.")
+            else:
+                raise ToolError(f"No answer from the chat's question (action: {res.action}); some chat apps close it "
+                                f"without showing it. No run was started. If the person didn't see a question: {ask_yourself}")
+        elif PERSON_TOKEN:
+            raise ToolError(f"This chat can't ask the person directly. No run was started. {ask_yourself}")
+        else:
+            permission = ("none: no person token is set, so each run's first scan waits for approval "
+                          "in the bridge web UI (Approve the run), or they let agents scan from its Scans tab")
+    run = await _call("POST", "/runs", {"recipe_id": recipe_id, "project_id": project_id, "inputs": inputs or {}})
+    run["permission"] = permission
+    return run
+
+
+@tool(annotations=WRITE)
+async def scanner_sign_off(run_id: str, summary: str = "", person_said: str = "",
+                           corrections: dict | None = None, ctx: Context = None) -> dict:
+    """Ask the person, in the chat, to sign off the step the run waits at (the
+    measurement): they confirm it or type corrected numbers. Show them the
+    evidence first (scanner_measurement's image, and the box you chose) and put
+    one line of what you checked in `summary`. This is the run's one person
+    intervention; never answer it yourself. If the chat can't ask, the result
+    says so: then ask them yourself ("Is the opening W × H mm right?") and call
+    again with `person_said`, and `corrections` ({field: number}) if they gave
+    different numbers. `person_said`: only when the chat couldn't ask the person and they agreed
+    in this conversation: their own words, quoted exactly. The bridge records
+    that their answer was relayed by you. Never fill it otherwise."""
+    r = await _call("GET", f"/runs/{_seg(run_id)}")
+    if r.get("waiting_for") != "input":
+        raise ToolError(f"run {run_id} is not waiting for a person (state {r.get('state')}, waiting for {r.get('waiting_for')})")
+    step = next(s for s in r["steps"] if s["step_id"] == r["current_step_id"])
+    rec = await _call("GET", f"/recipes/{_seg(r['recipe_id'])}")
+    d = next((s for s in rec["steps"] if s["step_id"] == step["step_id"]), {})
+    if d.get("review") == "final":
+        raise ToolError(f"step {step['step_id']!r} is yours: answer it with scanner_advance_run")
+    prop = step.get("proposal")
+    if not prop:
+        raise ToolError("nothing to sign off yet: propose an answer first with scanner_propose")
+    given = dict(prop["input"])
+    numeric = [n for n in d.get("needs", []) if isinstance(given.get(n), (int, float)) and not isinstance(given.get(n), bool)]
+    shown = ", ".join(f"{n.replace('_', ' ')} {given[n]}" for n in numeric) or json.dumps(given)
+    ask_yourself = (f"Show the person the result and ask in the chat whether it is right ({shown}); then call "
+                    "scanner_sign_off again with person_said = their words, and corrections if they gave other numbers.")
+    if person_said.strip() and PERSON_TOKEN:
+        bad = [k for k in (corrections or {}) if k not in numeric]
+        if bad:
+            raise ToolError(f"corrections can only change {', '.join(numeric)}; not {', '.join(bad)}")
+        corrected = {k: v for k, v in (corrections or {}).items() if v != given[k]}
+        given.update(corrected)
+        given["confirmed_via"] = f"relayed by the agent: \u201c{person_said.strip()[:300]}\u201d"
+        run = await _call_as_person("POST", f"/runs/{_seg(run_id)}/advance", {"step_id": step["step_id"], "input": given})
+        return {"signed_off": True, "relayed": True, "corrected": corrected, "run": run}
+    if not _can_ask(ctx):
+        if PERSON_TOKEN:
+            return {"signed_off": False, "asked": False, "message": f"This chat can't ask the person directly. {ask_yourself}"}
+        return {"signed_off": False, "asked": False,
+                "message": f"This chat can't ask the person directly. Ask them to confirm in the bridge web UI, run {run_id}."}
+    schema = _sign_off_form(numeric, given)
+    msg = f"{d.get('title') or step['step_id']}: {shown}." + (f" {prop['note']}." if prop.get("note") else "") + (f" {summary}" if summary else "")
+    res = await ctx.elicit(message=msg, schema=schema)
+    if res.action != "accept":
+        return {"signed_off": False, "asked": True, "action": res.action,
+                "message": f"No answer from the chat's question; some chat apps close it without showing it. If the person didn't see it: {ask_yourself}"}
+    corrected = {}
+    for n in numeric:
+        v = getattr(res.data, n)
+        if v != given[n]:
+            corrected[n] = int(v) if float(v).is_integer() else v
+    if not res.data.confirm and not corrected:
+        return {"signed_off": False, "asked": True, "message": "The person did not confirm and gave no correction."}
+    given.update(corrected)
+    given["confirmed_via"] = "asked in the chat"
+    run = await _call_as_person("POST", f"/runs/{_seg(run_id)}/advance", {"step_id": step["step_id"], "input": given})
+    return {"signed_off": True, "corrected": corrected, "run": run}
+
+
+@tool(annotations=READ)
+async def scanner_permissions(project_id: str | None = None) -> list:
+    """Standing permissions to scan (bridge 0.7.0+ records them on runs): each
+    grant's project, expiry, scans used of max_scans, who gave it, and its
+    run_id when it covers one run only. With a grant for the project, a run's
+    scans need no approval; check before starting a recipe run."""
+    gs = await _call("GET", "/grants")
+    return [g for g in gs if project_id is None or g.get("project_id") == project_id]
 
 
 @tool(annotations=READ)
@@ -443,20 +603,33 @@ async def run_recipe(recipe_id: str, project_id: str) -> str:
     lines.append(f"Then call scanner_start_run(recipe_id=\"{recipe_id}\", project_id=\"{project_id}\", inputs=…) "
                  "and follow it with scanner_run. The steps:")
     for n, s in enumerate(r["steps"], 1):
+        work = ("work out " + ", ".join(s.get("needs", [])) + " yourself"
+                + (f" from scanner_preview of step {s['preview_of']}'s scan_id" if s.get("preview_of") else ""))
         how = {
             "action": f"the bridge calls {s.get('operation_id')} itself",
-            "person": "work out " + ", ".join(s.get("needs", [])) + " yourself"
-                      + (f" from scanner_preview of step {s['preview_of']}'s scan_id" if s.get("preview_of") else "")
-                      + ", then scanner_propose it with a note; the person confirms or adjusts it in the bridge app",
+            "person": work + (", then scanner_advance_run it yourself: this step is yours (review = final), "
+                              "the person reviews it with the result at the sign-off, and the bridge's checks catch a bad answer"
+                              if s.get("review") == "final" else
+                              f"the bridge proposes it from step {s['propose_from']}; check it, show the person the evidence, "
+                              "then call scanner_sign_off (the one question to the person)"
+                              if s.get("propose_from") else
+                              ", then scanner_propose it with a note and call scanner_sign_off for the person to confirm"),
             "check": f"the bridge checks {', '.join(s.get('expect', []))} of step {s.get('of')}",
         }[s["kind"]]
         title = s.get("title") or s["step_id"]
         extra = f" — {s['instructions']}" if s.get("instructions") else ""
         lines.append(f"{n}. {title} [{s['kind']}: {how}]{extra}")
-    lines += ["", "AI-first: you find the window, choose the box and propose the measurement; the person only validates.",
-              "Use scanner_advance_run yourself only if the person tells you to go ahead without confirming.",
-              "When the run shows waiting_for = approval, ask the person to approve the scan in the bridge app.",
-              "Report each measured value with its uncertainty, and say plainly if a check failed or a step was declined."]
+    lines += ["", "AI-first: you do the work and the person signs off once. Aim for one person intervention per run.",
+              "scanner_start_run asks the person once, in the chat, to allow scanning for the visit when the project "
+              "has no permission yet; don't ask them anything else before the sign-off. If a tool says the chat can't ask "
+              "(or the person never saw a question), ask them yourself in one line and pass their exact words as person_said.",
+              "At the sign-off, show the measurement's evidence image (scanner_measurement) and say what you checked, "
+              "then call scanner_sign_off: the person confirms or corrects there. If it reports the chat can't ask, "
+              "they use the bridge web UI (Approve the run, then Looks right).",
+              "Answer steps marked review = final yourself; for the other person steps, propose and let the person confirm. "
+              "Advance those for the person only if they tell you to go ahead without confirming.",
+              "Report each measured value with its uncertainty, the person interventions the run counted, "
+              "and say plainly if a check failed or a step was declined."]
     return "\n".join(lines)
 
 
