@@ -112,7 +112,7 @@ def fn(tool):
 def test_tools_are_listed_without_operator_tools(tools):
     names = {t.name for t in run(tools.mcp.list_tools())}
     assert {"scanner_status", "scanner_start_scan", "scanner_preview", "scanner_aim", "scanner_export",
-            "scanner_start_run", "scanner_advance_run", "scanner_propose", "scanner_measure", "scanner_measurement", "scanner_coverage", "scanner_permissions", "scanner_propose_station", "scanner_set_mission", "scanner_update_targets", "scanner_ready_to_leave", "scanner_registration", "scanner_wall_face", "scanner_processing"} <= names
+            "scanner_start_run", "scanner_advance_run", "scanner_propose", "scanner_measure", "scanner_measurement", "scanner_coverage", "scanner_permissions", "scanner_propose_station", "scanner_set_mission", "scanner_update_targets", "scanner_ready_to_leave", "scanner_registration", "scanner_wall_face", "scanner_processing", "scanner_minimap"} <= names
     assert not any("approve" in n or "grant" in n or "delete" in n for n in names)
 
 
@@ -347,3 +347,9 @@ def test_processing_runs_on_the_pi_without_a_worker(tools):
     out = run(fn(tools.scanner_processing)())
     assert out["workers"] == [] and out["runs_on"] == "the Pi"
     assert "x9-bridge worker --bridge" in out["start_worker"]["command"]
+
+
+def test_minimap_draws_before_any_station(tools):
+    p = run(fn(tools.scanner_create_project)(f"map-{int(time.time() * 1000)}"))["project_id"]
+    out = run(fn(tools.scanner_minimap)(p))
+    assert "Not registered yet" in out[0] and len(out) == 2

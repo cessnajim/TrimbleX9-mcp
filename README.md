@@ -182,6 +182,7 @@ A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 | `scanner_set_mission` | write | Sets what the job is for (the person's goal, kind, done-when criteria) and its first ledger targets (bridge 0.8.0+) |
 | `scanner_mission` | read | The mission, its state and its ledger |
 | `scanner_registration` | read | The project's stations in one frame (registered by the bridge after each full dome), the walls found, and the plan picture (bridge 0.9.0+) |
+| `scanner_minimap` | read | The job so far as a simple line map: walls, numbered stations (amber when not trusted), wall targets; redrawn after every station (bridge 0.11.0+) |
 | `scanner_wall_face` | read | How much of a wall face the registered stations saw: share of its length, spacing, stations, unseen stretches (bridge 0.9.0+) |
 | `scanner_update_targets` | write | Adds or updates ledger targets: open, covered (by stations), measured (with a measurement), declined (with a reason) |
 | `scanner_ready_to_leave` | write (asks the person) | Says the job is done (refused while a target is open) and asks the person to sign it off in the chat, or relays their words |

@@ -513,6 +513,28 @@ async def scanner_registration(project_id: str) -> list:
 
 
 @tool(annotations=READ)
+async def scanner_minimap(project_id: str) -> list:
+    """The job so far as a simple line map (bridge 0.11.0+): walls as lines,
+    stations as numbered dots with a tick for the way each faced (amber with
+    "?" while not trusted), and the mission's wall targets in their status
+    colours. Stations scanned but not yet placed are listed underneath. The
+    bridge redraws it after every station; show it to the person after each
+    one, with a line on what changed. Its frame is the first station's, not
+    north: talk about places by landmarks and station numbers."""
+    reg = await _call("GET", f"/projects/{_seg(project_id)}/registration")
+    lines = [reg.get("summary", "")]
+    for st in reg.get("stations", []):
+        if st.get("verdict") not in ("confirmed", "frame"):
+            lines.append(f"Station {st['station']}: {st.get('verdict') or 'not placed'}"
+                         + (f" ({st['reasons'][0]})" if st.get("reasons") else ""))
+    async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+        r = await c.get(f"{URL}/projects/{_seg(project_id)}/minimap", headers=_headers())
+    if r.status_code >= 400:
+        return ["\n".join(lines) + f"\n(no map: {r.status_code})"]
+    return ["\n".join(lines), Image(data=r.content, format="png")]
+
+
+@tool(annotations=READ)
 async def scanner_processing() -> dict:
     """Where the heavy work (registering stations) runs (bridge 0.10.0+).
     `workers` lists computers doing it for the bridge; with none, the Pi does
@@ -858,7 +880,8 @@ async def survey_mission(project_id: str, goal: str) -> str:
         "2. At each station: a full dome (scanner_start_scan; it asks the person once for the visit's permission), "
         "then scanner_coverage and scanner_preview. Update the ledger with scanner_update_targets: add every target "
         "you can see or infer (each facade, each window), mark what this station covered with its scan id, keep the rest open.",
-        "   From the second station on, the bridge registers each dome into one frame by itself: read scanner_registration "
+        "   After each station, show the person scanner_minimap (the map so far) with a line on what changed. "
+        "From the second station on, the bridge registers each dome into one frame by itself: read scanner_registration "
         "(wait while registering_job_id is set). Give each facade target its wall_id from the plan; the bridge then marks "
         "facades covered from the geometry, so don't mark them by eye.",
         "3. While targets are open: choose the next station for what is still open, not the biggest shadow "
