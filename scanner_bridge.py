@@ -513,6 +513,36 @@ async def scanner_registration(project_id: str) -> list:
 
 
 @tool(annotations=READ)
+async def scanner_processing() -> dict:
+    """Where the heavy work (registering stations) runs (bridge 0.10.0+).
+    `workers` lists computers doing it for the bridge; with none, the Pi does
+    it: about 40 s to a minute and a half per new station. A laptop is
+    several times faster.
+
+    Ask the person once per laptop, the first time you set up on it, and
+    remember the answer (don't ask again each job): "Process the scans on
+    this laptop? It's faster, and uses some of its battery. Otherwise the
+    Pi does it." If they say yes and no worker is listed, start one on the
+    laptop yourself, in the background, as `start_worker` describes. If
+    they say no, leave it to the Pi. Either way, registration still
+    finishes: the bridge falls back to the Pi when a worker goes away."""
+    workers = await _call("GET", "/workers")
+    base = URL.rsplit("/v1", 1)[0] if URL else "http://10.55.0.1:8795"
+    return {
+        "workers": workers,
+        "runs_on": ", ".join(w["worker"] for w in workers) if workers else "the Pi",
+        "start_worker": {
+            "binary": "x9-bridge from the trimble-x9-bridge release for this laptop "
+                      "(trimble-x9-bridge-<version>-aarch64-apple-darwin.tar.gz for Apple silicon, x86_64-apple-darwin for Intel Macs)",
+            "token": "~/.config/x9-worker/token holding an agent token for the bridge; on the field setup copy the Pi's without showing it: "
+                     "ssh x9-bridge 'cat ~/x9-bridge/agent.token' > ~/.config/x9-worker/token",
+            "command": f"x9-bridge worker --bridge {base}",
+            "note": "Run it in the background for the visit; it reconnects by itself and keeps decoded stations in ~/.cache/x9-worker.",
+        },
+    }
+
+
+@tool(annotations=READ)
 async def scanner_wall_face(project_id: str, wall_id: str = "", from_xy: list | None = None, to_xy: list | None = None) -> dict:
     """How much of a wall face the registered stations saw, without changing
     anything (bridge 0.9.0+): a `wall_id` from scanner_registration, or a
@@ -821,6 +851,8 @@ async def survey_mission(project_id: str, goal: str) -> str:
     return "\n".join([
         f"The person wants: \"{goal}\" (project {project_id}). You run the visit; they carry the tripod and sign off once at the end.",
         "",
+        "0. scanner_processing: if no worker is listed and you haven't asked on this laptop before, ask once whether to "
+        "process scans on the laptop (faster) and start the worker if they agree; remember the answer.",
         "1. scanner_set_mission: their words as goal, the kind (exterior, windows, room or custom), and done_when: "
         "criteria concrete enough to check (spacing, which walls, no shadows on what).",
         "2. At each station: a full dome (scanner_start_scan; it asks the person once for the visit's permission), "
