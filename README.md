@@ -14,6 +14,20 @@ It runs in one of two modes:
   scanner and enforces the rules (approvals, battery, busy scanner, echo
   checks) for every client. The tools are thin calls to the bridge's API.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/northidaholabs/trimble-x9-bridge/main/docs/img/connections.svg" width="900"
+       alt="In bridge mode on a field kit: the agent on the laptop runs this MCP server on a Raspberry Pi over ssh on a USB-C cable; the server calls x9-bridge, which drives the Trimble X9 over the scanner's Wi-Fi or USB.">
+</p>
+
+What the agent gets back is something it can look at. The minimap of a
+19-station colour scan of an administration building, redrawn by
+`scanner_minimap` after every station:
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/northidaholabs/trimble-x9-bridge/main/docs/img/admin-minimap.png" width="560"
+       alt="Minimap of the administration building: building walls, low walls and vegetation as lines, and numbered station dots.">
+</p>
+
 **Interoperability** project: written from scratch against the instrument's
 network API, with behavior verified on a live instrument. No vendor code,
 firmware or vendor documentation is included or redistributed. How the API
@@ -33,13 +47,13 @@ Python 3.10 or later. Install from the GitHub release tag; this provides the
 console script `trimblex9-mcp`, which speaks MCP over stdio.
 
 ```bash
-pip install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.0"
+pip install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.1"
 # or, isolated:
-pipx install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.0"
+pipx install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.1"
 # or run without installing:
-uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.0" trimblex9-mcp
+uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.1" trimblex9-mcp
 # no git on the host (e.g. a minimal Raspberry Pi image):
-pip install https://github.com/northidaholabs/TrimbleX9-mcp/archive/refs/tags/v0.12.0.tar.gz
+pip install https://github.com/northidaholabs/TrimbleX9-mcp/archive/refs/tags/v0.12.1.tar.gz
 ```
 
 Dependencies: `mcp` and `httpx` (see [Compatibility](#compatibility)).
@@ -280,6 +294,19 @@ and `covered` is refused while less is seen.
 
 ## Safety
 
+For agents, in short:
+
+- **Permission:** scans run under a grant the person gives once per visit, in
+  the chat. Never use the operator (person) token yourself; the server uses it
+  only after the person said yes.
+- **Secrets:** never print, paste or log tokens or the scanner's Wi-Fi
+  passphrase. Keep tokens in files (`~/x9-bridge/*.token`), not in client
+  settings: prefer the launcher over `--env SCANNER_BRIDGE_TOKEN=…`, which
+  stores the token in the client's config.
+- **The laser pointer** (the scanner's own `laser-pointer` API, not exposed by
+  these tools): only with the person at the scanner and having said so, and
+  never without explicit angles aimed at the floor.
+
 ### Read-only by default (direct mode)
 
 Without `SCANNER_ALLOW_ACTUATION` the actuating and destructive tools are not
@@ -428,7 +455,7 @@ claude mcp add trimblex9 \
 Without installing first:
 
 ```bash
-claude mcp add trimblex9 -- uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.0" trimblex9-mcp
+claude mcp add trimblex9 -- uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.1" trimblex9-mcp
 ```
 
 Bridge mode:
