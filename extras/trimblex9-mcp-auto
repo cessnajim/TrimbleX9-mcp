@@ -1,0 +1,33 @@
+#!/bin/sh
+# Start the scanner MCP server on the Pi. Installed at ~/x9-bridge/bin/.
+#
+# Default, bridge mode: through the local x9-bridge service with the agent
+# token. The bridge enforces the rules (approvals and grants, battery, one
+# scan queue), so this is how agents scan. The person token is used only after
+# the person says yes in the chat (MCP elicitation, or relayed and recorded).
+#
+# X9_MCP_MODE=direct: talk to the X9 itself (diagnostics; USB first, then the
+# X9 Wi-Fi). While x9-bridge is running it is read-only, whatever
+# SCANNER_ALLOW_ACTUATION says: two programs driving one scanner would fight,
+# and actuation here would skip the bridge's rules.
+MODE="${X9_MCP_MODE:-bridge}"
+if [ "$MODE" = "bridge" ]; then
+  export SCANNER_BRIDGE_URL="${SCANNER_BRIDGE_URL:-http://127.0.0.1:8795/v1}"
+  export SCANNER_BRIDGE_TOKEN="${SCANNER_BRIDGE_TOKEN:-$(cat "$HOME/x9-bridge/agent.token")}"
+  [ -r "$HOME/x9-bridge/operator.token" ] && export SCANNER_PERSON_TOKEN="${SCANNER_PERSON_TOKEN:-$(cat "$HOME/x9-bridge/operator.token")}"
+  exec "$HOME/x9-bridge/.venv/bin/trimblex9-mcp" "$@"
+fi
+if [ "$MODE" != "direct" ]; then
+  echo "trimblex9-mcp-auto: X9_MCP_MODE must be bridge (default) or direct, not '$MODE'" >&2
+  exit 2
+fi
+if [ -n "${SCANNER_ALLOW_ACTUATION:-}" ] && systemctl is-active --quiet x9-bridge 2>/dev/null; then
+  echo "trimblex9-mcp-auto: x9-bridge is running, so direct mode is read-only (SCANNER_ALLOW_ACTUATION ignored). Scan through bridge mode." >&2
+  unset SCANNER_ALLOW_ACTUATION
+fi
+unset SCANNER_BRIDGE_URL SCANNER_BRIDGE_TOKEN SCANNER_PERSON_TOKEN
+for B in http://192.168.42.1:34567/api/v1 http://192.168.43.1:34567/api/v1; do
+  if curl -s -m 2 -o /dev/null "$B/tasks"; then SCANNER_BASE=$B; break; fi
+done
+export SCANNER_BASE="${SCANNER_BASE:-http://192.168.42.1:34567/api/v1}"
+exec "$HOME/x9-bridge/.venv/bin/trimblex9-mcp" "$@"

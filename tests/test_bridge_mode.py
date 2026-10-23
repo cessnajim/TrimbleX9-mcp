@@ -1,7 +1,7 @@
 """Bridge-mode tests: the MCP tools against a real x9-bridge and x9-mock.
 
 Skipped unless X9_BRIDGE_BIN points at a directory with the `x9-bridge` and
-`x9-mock` binaries (from x9-controller: cargo build --release). With
+`x9-mock` binaries (from trimble-x9-bridge: cargo build --release). With
 X9_FIXTURES (dome/area .tzf + .jpg, as for the bridge's e2e test) the preview,
 aim and export tools are exercised too.
 
@@ -58,7 +58,7 @@ def tools():
     tmp = tempfile.mkdtemp()
     tok = os.path.join(tmp, "tokens")
     with open(tok, "w") as f:
-        f.write(f"claude agent {AGENT}\njim operator {OPERATOR}\n")
+        f.write(f"claude agent {AGENT}\ncrew operator {OPERATOR}\n")
     recipes = os.path.join(tmp, "recipes")
     os.makedirs(recipes)
     env_m = {**os.environ, "X9_MOCK_ADDR": MOCK, "X9_MOCK_SPEED": "20"}
@@ -218,7 +218,7 @@ def test_permission_is_asked_once_in_the_chat(tools):
     r = run(fn(tools.scanner_start_run)("window-measurement", p, {"purpose": "blinds"}, ctx=yes))
     assert r["permission"] == "given in the chat" and len(yes.asked) == 1
     gs = [g for g in _operator("GET", "/grants") if g["project_id"] == p]
-    assert len(gs) == 1 and gs[0]["granted_by"] == "jim" and gs[0]["max_scans"] == 20
+    assert len(gs) == 1 and gs[0]["granted_by"] == "crew" and gs[0]["max_scans"] == 20
     r = _wait_run(tools, r["run_id"], lambda r: r["waiting_for"] in ("approval", "input"), timeout=60)
     assert r["waiting_for"] == "input" and r["interventions"]["approvals"] == 0
     run(fn(tools.scanner_cancel_run)(r["run_id"]))
@@ -262,7 +262,7 @@ def test_one_sentence_run_signs_off_in_the_chat(tools):
     r = _wait_run(tools, rid, lambda r: False, timeout=20)
     assert r["state"] == "succeeded"
     assert r["interventions"]["total"] == 1 and r["interventions"]["confirmed"] == 1
-    assert [g["granted_by"] for g in r["authorized_by"]] == ["jim"]
+    assert [g["granted_by"] for g in r["authorized_by"]] == ["crew"]
 
 
 @pytest.mark.skipif(not FIX, reason="needs X9_FIXTURES for the close-up and the measurement")
@@ -329,7 +329,7 @@ def test_mission_ledger_and_sign_off_in_the_chat(tools):
     run(fn(tools.scanner_update_targets)(p, [{"target_id": "north", "status": "covered", "stations": [scan]},
                                              {"target_id": "south", "name": "South facade", "status": "declined", "note": "neighbour's yard, locked"}]))
     out = run(fn(tools.scanner_ready_to_leave)(p, "North seen from station 1; south declined (locked yard).", ctx=person))
-    assert out["signed_off"] and out["mission"]["state"] == "signed_off" and out["mission"]["signed_off_by"] == "jim"
+    assert out["signed_off"] and out["mission"]["state"] == "signed_off" and out["mission"]["signed_off_by"] == "crew"
     assert out["mission"]["confirmed_via"] == "asked in the chat" and "Ready to leave" in person.asked[-1]
     assert "1 covered, 1 declined" in person.asked[-1]
 

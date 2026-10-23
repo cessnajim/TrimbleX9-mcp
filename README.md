@@ -33,16 +33,42 @@ Python 3.10 or later. Install from the GitHub release tag; this provides the
 console script `trimblex9-mcp`, which speaks MCP over stdio.
 
 ```bash
-pip install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.3.1"
+pip install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.0"
 # or, isolated:
-pipx install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.3.1"
+pipx install "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.0"
 # or run without installing:
-uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.3.1" trimblex9-mcp
+uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.0" trimblex9-mcp
 # no git on the host (e.g. a minimal Raspberry Pi image):
-pip install https://github.com/northidaholabs/TrimbleX9-mcp/archive/refs/tags/v0.3.1.tar.gz
+pip install https://github.com/northidaholabs/TrimbleX9-mcp/archive/refs/tags/v0.12.0.tar.gz
 ```
 
 Dependencies: `mcp` and `httpx` (see [Compatibility](#compatibility)).
+
+### On a Raspberry Pi without internet
+
+A field Pi is often on the scanner's Wi-Fi, with no internet. Build a
+wheelhouse on a machine that has internet, for the Pi's Python (Raspberry Pi
+OS trixie: CPython 3.13, aarch64), copy it over and install from it:
+
+```bash
+# on a machine with internet
+tag=v0.12.1
+pip wheel --no-deps -w wheelhouse "git+https://github.com/northidaholabs/TrimbleX9-mcp@$tag"
+pip download -d wheelhouse --only-binary=:all: --platform manylinux2014_aarch64 \
+  --python-version 3.13 --implementation cp "mcp>=1.7,<3" "httpx>=0.27"
+curl -L -o wheelhouse/trimblex9-mcp-auto \
+  https://raw.githubusercontent.com/northidaholabs/TrimbleX9-mcp/$tag/extras/trimblex9-mcp-auto
+scp -r wheelhouse <pi>:
+
+# on the Pi
+python3 -m venv ~/x9-bridge/.venv
+~/x9-bridge/.venv/bin/pip install --no-index --find-links ~/wheelhouse trimblex9-mcp
+install -D -m 0755 ~/wheelhouse/trimblex9-mcp-auto ~/x9-bridge/bin/trimblex9-mcp-auto
+```
+
+The launcher (`extras/trimblex9-mcp-auto`, from v0.12.1) starts the server for
+a field kit; see
+[On a field Pi, through the bridge](#on-a-field-pi-through-the-bridge-recommended).
 
 `trimblex9-mcp` is meant to be started by an MCP client, not run by hand; on a
 terminal it just waits for MCP messages on stdin.
@@ -182,6 +208,8 @@ A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 | `scanner_set_mission` | write | Sets what the job is for (the person's goal, kind, done-when criteria) and its first ledger targets (bridge 0.8.0+) |
 | `scanner_mission` | read | The mission, its state and its ledger |
 | `scanner_registration` | read | The project's stations in one frame (registered by the bridge after each full dome), the walls found, and the plan picture (bridge 0.9.0+) |
+| `scanner_processing` | read | Where registration runs: the laptop workers connected, or the Pi; how to start a worker on the laptop. Ask the person once per laptop (bridge 0.10.0+) |
+| `scanner_sign_off` | write | Asks the person, in the chat, to confirm a run's sign-off step (or to correct the numbers); relayed with `person_said` where the chat can't ask |
 | `scanner_minimap` | read | The job so far as a simple line map: walls, numbered stations (amber when not trusted), wall targets; redrawn after every station (bridge 0.11.0+) |
 | `scanner_wall_face` | read | How much of a wall face the registered stations saw: share of its length, spacing, stations, unseen stretches (bridge 0.9.0+) |
 | `scanner_update_targets` | write | Adds or updates ledger targets: open, covered (by stations), measured (with a measurement), declined (with a reason) |
@@ -196,6 +224,7 @@ A typical direct-mode scan: `scanner_scan_modes` → `scanner_projects` (or
 
 | Prompt | Arguments | What it does |
 |---|---|---|
+| `survey_mission` | `project_id`, `goal` | Runs a site visit toward one goal: asks once about processing on the laptop, sets the mission, scans station by station with the minimap and registration, proposes each next station by landmarks, and ends with the one sign-off |
 | `run_recipe` | `recipe_id`, `project_id` | Fetches the recipe from the bridge and returns step-by-step instructions for walking it with the person: which inputs to ask for, then `scanner_start_run` and `scanner_run`, how each `action` / `person` / `check` step is handled, to ask for approval when the run waits for it, and to report measured values with their uncertainty. |
 
 Direct mode has no prompts.
@@ -207,8 +236,8 @@ does the rest. Two moments need the person, and both are asked in the chat
 itself, through MCP elicitation, where the answer comes from the person and
 not from the model:
 
-1. **Permission for the visit.** `scanner_start_run` checks for a grant in the
-   project. Without one it asks once: "Let the agent scan in "<project>" for
+1. **Permission for the visit.** `scanner_start_run` and `scanner_start_scan`
+   check for a grant in the project. Without one it asks once: "Let the agent scan in "<project>" for
    the next 8 hours (up to 20 scans)?". Yes creates the grant with
    `SCANNER_PERSON_TOKEN`; no starts nothing. Later runs in the visit ask
    nothing.
@@ -356,6 +385,28 @@ other exceptions). The messages are:
 
 ## Client configuration
 
+### On a field Pi, through the bridge (recommended)
+
+The usual setup: the scanner talks to
+[trimble-x9-bridge](https://github.com/northidaholabs/trimble-x9-bridge) on a
+Raspberry Pi by the tripod (its `ops/README.md` builds the Pi), this server runs
+on the same Pi, and the agent on the laptop starts it over ssh. The launcher
+`extras/trimblex9-mcp-auto` (installed at `~/x9-bridge/bin/`) runs bridge mode
+with the bridge's agent token from `~/x9-bridge/agent.token`, and passes the
+person's token from `~/x9-bridge/operator.token` as `SCANNER_PERSON_TOKEN`, used
+only after the person says yes in the chat. With an ssh alias `x9-bridge` for
+the Pi (key login, no prompts):
+
+```bash
+claude mcp add -s user x9-bridge -- ssh -o BatchMode=yes x9-bridge 'X9_MCP_MODE=bridge ~/x9-bridge/bin/trimblex9-mcp-auto'
+```
+
+Quote the remote command, so `~` is the Pi's home, not the laptop's.
+
+Check: the client lists the `scanner_*` tools, and `scanner_status` shows the
+bridge and the scanner. `X9_MCP_MODE=direct` starts the same server in direct
+mode for diagnostics; it stays read-only while the bridge runs.
+
 ### Claude Code
 
 Direct mode, read-only:
@@ -377,7 +428,7 @@ claude mcp add trimblex9 \
 Without installing first:
 
 ```bash
-claude mcp add trimblex9 -- uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.3.1" trimblex9-mcp
+claude mcp add trimblex9 -- uvx --from "git+https://github.com/northidaholabs/TrimbleX9-mcp@v0.12.0" trimblex9-mcp
 ```
 
 Bridge mode:
@@ -415,17 +466,17 @@ virtualenv, `<venv>/bin/trimblex9-mcp`).
 
 ### On a remote host over SSH (e.g. a Raspberry Pi by the scanner)
 
-The scanner is usually plugged into a small computer on site, not into the
+The scanner is usually reached from a small computer on site, not from the
 machine running the agent. Install the server on that host and let the client
-start it over SSH; MCP's stdio transport passes through `ssh` unchanged.
+start it over SSH; MCP's stdio transport passes through `ssh` unchanged. With
+the bridge on that host, use the launcher as in
+[On a field Pi, through the bridge](#on-a-field-pi-through-the-bridge-recommended).
+Without a bridge (direct mode):
 
 ```bash
-# on the Pi
-pip install https://github.com/northidaholabs/TrimbleX9-mcp/archive/refs/tags/v0.3.1.tar.gz
-
 # on the agent's machine
 claude mcp add trimblex9 -- ssh -T pi@scanner-pi.local \
-  'SCANNER_DOWNLOAD_DIR=$HOME/scanner-downloads ~/.local/bin/trimblex9-mcp'
+  'SCANNER_DOWNLOAD_DIR=$HOME/scanner-downloads ~/x9-bridge/.venv/bin/trimblex9-mcp'
 ```
 
 ```json
@@ -434,7 +485,7 @@ claude mcp add trimblex9 -- ssh -T pi@scanner-pi.local \
     "trimblex9": {
       "command": "ssh",
       "args": ["-T", "pi@scanner-pi.local",
-               "SCANNER_ALLOW_ACTUATION=1 ~/.local/bin/trimblex9-mcp"]
+               "SCANNER_ALLOW_ACTUATION=1 ~/x9-bridge/.venv/bin/trimblex9-mcp"]
     }
   }
 }
