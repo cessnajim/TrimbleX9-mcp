@@ -495,8 +495,12 @@ async def scanner_registration(project_id: str) -> list:
     Trust the verdicts, not the picture: each station is `confirmed` (two or
     more ties, and fresh fits, free space and the ground agree), `single`
     (one tie), `frame`, `doubtful` (a check finds it off against most of its
-    neighbours), `ambiguous` (symmetric or repeated walls: it fits in more
-    than one place) or `unplaced`; `reasons` say why. Only confirmed, single
+    neighbours), `grouped` (tied to stations in a separate group, not yet to
+    the main one: the next station should see walls of both), `ambiguous`
+    (symmetric or repeated walls: it fits in more than one place) or
+    `unplaced`; `reasons` say why. Walls carry a `kind`: building, low wall
+    or vegetation (hedges and trees against walls); give facade targets
+    building walls. Only confirmed, single
     and frame stations count towards wall coverage. Plan the next station to
     settle what isn't trusted: one that sees walls an earlier station saw
     (unplaced), something that breaks the symmetry such as a corner, door or
